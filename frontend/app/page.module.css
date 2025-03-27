@@ -6,13 +6,13 @@
   --button-primary-hover: #383838;
   --button-secondary-hover: #f2f2f2;
 
-  display: grid;
-  grid-template-rows: 20px 1fr 20px;
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-items: center;
   min-height: 100svh;
   padding: 80px;
-  gap: 64px;
+  gap: 48px;
   font-family: var(--font-geist-sans);
 }
 
@@ -30,8 +30,7 @@
 .main {
   display: flex;
   flex-direction: column;
-  gap: 32px;
-  grid-row-start: 2;
+  gap: 24px;
 }
 
 .main ol {
@@ -56,6 +55,13 @@
   font-weight: 600;
 }
 
+.headWrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;;
+}
+
 .formWrapper {
   display: flex;
   flex-direction: column;
@@ -63,63 +69,98 @@
   margin-top: 1rem;
 }
 
+.formWrapper form {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  gap: 16px;
+}
+
 .button28{
-display: inline-block;
-outline: none;
-cursor: pointer;
-font-size: 14px;
-line-height: 1;
-border-radius: 500px;
-transition-property: background-color,border-color,color,box-shadow,filter;
-transition-duration: .3s;
-border: 1px solid transparent;
-letter-spacing: 2px;
-min-width: 160px;
-text-transform: uppercase;
-white-space: normal;
-font-weight: 700;
-text-align: center;
-padding: 16px 14px 18px;
-color: #a1a6ab;
-box-shadow: inset 0 0 0 2px #616467;
-background-color: transparent;
-height: 48px;
+  display: inline-block;
+  outline: none;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 500px;
+  transition-property: background-color,border-color,color,box-shadow,filter;
+  transition-duration: .3s;
+  border: 1px solid transparent;
+  letter-spacing: 2px;
+  min-width: 160px;
+  text-transform: uppercase;
+  white-space: normal; 
+  font-weight: 700;
+  text-align: center;
+  padding: 16px 14px 18px;
+  color: #a1a6ab;
+  box-shadow: inset 0 0 0 2px #616467;
+  background-color: transparent;
+  height: 48px;
 }
 .button28:hover{
-    color: #fff;
-    background-color: #333536;
+  color: #fff;
+  background-color: #333536;
 }
 
 .statusBox {
   margin-top: .5rem;
   padding: 1rem;
-
-}
-
-
-.ctas {
   display: flex;
-  gap: 16px;
-}
-
-.ctas a {
-  appearance: none;
-  border-radius: 128px;
-  height: 48px;
-  padding: 0 20px;
-  border: none;
-  border: 1px solid transparent;
-  transition:
-    background 0.2s,
-    color 0.2s,
-    border-color 0.2s;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
   justify-content: center;
-  font-size: 16px;
-  line-height: 20px;
-  font-weight: 500;
+  align-items: center;
+
+
+  
+}
+
+
+.label {
+  font-size: 1.25rem;
+  margin-bottom: 0.5rem;
+  display: block;
+}
+
+.input {
+  padding: 0.5rem;
+  font-size: 1rem;
+  width: 100%;
+  max-width: 300px;
+  margin-bottom: 1rem;
+  border: 1px solid #ccc;
+  border-radius: 0.5rem;
+}
+
+.count {
+  font-size: 1.25rem;
+}
+
+.tableWrapper {
+  width: 30%;
+  border-collapse: collapse;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+
+.table {
+  width: 100%;
+}
+
+.tableHeader {
+  background-color: #4b5867;
+  color: #fff;
+  padding: 0.5rem;
+  text-align: left;
+  border: 1px solid #5f5f5f;
+}
+
+.tableCell {
+  padding: 0.5rem;
+  border: 1px solid #818181;
 }
 
 a.primary {
@@ -167,6 +208,12 @@ a.secondary {
   }
 }
 
+@media (max-width: 1200px) {
+  .table {
+    width: 60%;
+  }
+}
+
 @media (max-width: 600px) {
   .page {
     padding: 32px;
@@ -180,15 +227,8 @@ a.secondary {
   .main ol {
     text-align: center;
   }
-
-  .ctas {
-    flex-direction: column;
-  }
-
-  .ctas a {
-    font-size: 14px;
-    height: 40px;
-    padding: 0 16px;
+  .table {
+    width: 80%;
   }
 
   a.secondary {
@@ -202,8 +242,4 @@ a.secondary {
   }
 }
 
-@media (prefers-color-scheme: dark) {
-  .logo {
-    filter: invert();
-  }
-}
+

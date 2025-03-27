@@ -33,7 +33,7 @@ export default function CustomFileInput({ onFileSelect }: CustomFileInputProps) 
         style={{ display: 'none' }}
       />
       <button className={styles.button28} onClick={handleButtonClick}>Browse...</button>
-      <span style={{ marginLeft: '1rem' }}>{fileName}</span>
+      <span>{fileName}</span>
     </>
   );
 }

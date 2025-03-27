@@ -2,12 +2,11 @@
 
 import { useState, FormEvent } from 'react';
 import styles from '@/app/page.module.css';
-import Header from '@/components/Header';
 import CustomFileInput from '@/components/CustomFileInput';
 
 export default function BulkUpdatePage() {
   const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState<string>('Please select a CSV file.');
+  const [status, setStatus] = useState<string>('');
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -39,20 +38,24 @@ export default function BulkUpdatePage() {
   };
 
   return (
-    <>
-    <Header />
-    <div style={{ padding: '2rem' }}>
-      <div className={styles.formWrapper}>
-        <form onSubmit={handleSubmit}>
-          {/* Pass the onFileSelect callback to update the parent's file state */}
-          <CustomFileInput onFileSelect={setFile} />
-          <button className={styles.button28} type="submit" style={{ marginLeft: '1rem' }}>
-            Start Bulk Update
-          </button>
-        </form>
+    <div className={styles.page}>
+      <div className={styles.headWrapper}>
+        <h2>Bulk Update</h2>
+        <h4>Upload a CSV file to start a bulk update.</h4>
+        <p>Include columns &quot;Magewell ID&quot; and &quot;Magewell IP&quot;</p>
       </div>
-      {status && <div className={styles.statusBox}>{status}</div>}
+      <div className={styles.main}>
+        <div className={styles.formWrapper}>
+          <form onSubmit={handleSubmit}>
+            {/* Pass the onFileSelect callback to update the parent's file state */}
+            <CustomFileInput onFileSelect={setFile} />
+            <button className={styles.button28} type="submit">
+              Start Bulk Update
+            </button>
+          </form>
+        </div>
+        {status && <div className={styles.statusBox}>{status}</div>}
+      </div>
     </div>
-    </>
   );
 }
