@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Query, UploadFile, File
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from yarl import URL
-from magewell_settings import get_modified_settings
+from .magewell_settings import get_modified_settings
 
 
 app = FastAPI()
