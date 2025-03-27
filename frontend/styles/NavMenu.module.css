@@ -1,0 +1,30 @@
+.nav {
+    padding: 1rem;
+    position: absolute;
+    bottom: 0;
+    width: 100%;
+  }
+  
+  .menu {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    gap: 1rem;
+    justify-content: flex-end;
+  }
+  
+  .menuItem {
+    font-size: 1rem;
+    font-weight: 600;
+  }
+  
+  .menuItem a {
+    color: #fff;
+    text-decoration: none;
+  }
+  
+  .menuItem a:hover {
+    text-decoration: underline;
+  }
+  
