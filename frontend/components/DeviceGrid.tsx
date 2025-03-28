@@ -7,17 +7,21 @@ import styles from '@/styles/DeviceGrid.module.css';
 
 interface DeviceGridProps {
   devices: Device[];
-  onCardClick: (device: Device) => void;
+  selectedDeviceIps: string[]; // Array of IP addresses of selected devices.
+  onSelectToggle: (device: Device) => void;
+  onSetControl: (device: Device) => void;
 }
 
-const DeviceGrid: React.FC<DeviceGridProps> = ({ devices, onCardClick }) => {
+const DeviceGrid: React.FC<DeviceGridProps> = ({ devices, selectedDeviceIps, onSelectToggle, onSetControl }) => {
   return (
     <div className={styles.grid}>
       {devices.map((device) => (
-        <DeviceCard
+        <DeviceCard 
           key={device.ip}
           device={device}
-          onClick={() => onCardClick(device)}
+          isSelected={selectedDeviceIps.includes(device.ip)}
+          onSelectToggle={onSelectToggle}
+          onSetControl={onSetControl}
         />
       ))}
     </div>

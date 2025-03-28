@@ -1,20 +1,22 @@
 'use client';
 
 import { useState, useEffect, FormEvent, ChangeEvent } from 'react';
-import styles from './page.module.css';
 import DeviceGrid from '@/components/DeviceGrid';
 import { Device } from '@/components/DeviceCard';
-import WaterfallIcon from '@/components/Waterfall'
+import styles from './page.module.css';
+import WaterfallIcon from '@/components/Waterfall';
 
 export default function HomePage() {
   const [loading, setLoading] = useState<boolean>(false);
   const [devices, setDevices] = useState<Device[]>([]);
   const [error, setError] = useState<string>('');
   const [subnet, setSubnet] = useState<string>('');
-  const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
+  const [selectedControlDevice, setSelectedControlDevice] = useState<Device | null>(null);
+  const [selectedPushIps, setSelectedPushIps] = useState<string[]>([]);
   const [controlMessage, setControlMessage] = useState<string>('');
+  const [pushResult, setPushResult] = useState<string>('');
 
-  // Fetch the default local subnet from the backend and return it.
+  // Fetch local subnet
   const fetchLocalSubnet = async (): Promise<string | null> => {
     try {
       const res = await fetch('http://127.0.0.1:8000/local-subnet');
@@ -26,22 +28,17 @@ export default function HomePage() {
         console.log('Fetched local subnet:', data.local_subnet);
         setSubnet(data.local_subnet);
         return data.local_subnet;
-      } else {
-        return null;
       }
+      return null;
     } catch (err: unknown) {
       console.error('Error fetching local subnet:', err);
       return null;
     }
   };
 
-  // Scan the network using the specified subnet.
-  // forceRescan: if true, passes rescan=true to the backend to force a new scan.
+  // Scan network
   const scanNetwork = async (subnetToScan: string, forceRescan: boolean = false) => {
-    if (!subnetToScan) {
-      console.error('No subnet provided for scanning');
-      return;
-    }
+    if (!subnetToScan) return;
     setLoading(true);
     setError('');
     console.log('Scanning network for subnet:', subnetToScan, 'forceRescan:', forceRescan);
@@ -50,29 +47,24 @@ export default function HomePage() {
         subnetToScan
       )}&per_ip_timeout=1.0&max_concurrent=50&rescan=${forceRescan}`;
       const res = await fetch(url);
-      if (!res.ok) {
-        throw new Error(`HTTP error! Status: ${res.statusText}`);
-      }
+      if (!res.ok) throw new Error(`HTTP error! Status: ${res.statusText}`);
       const data = await res.json();
       console.log('Scan response data:', data);
       setDevices(data.devices || []);
+      setSelectedPushIps([]); // reset selections on new scan
     } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError('Unknown error occurred');
-      }
+      if (err instanceof Error) setError(err.message);
+      else setError('Unknown error occurred');
     } finally {
       setLoading(false);
     }
   };
 
-  // On mount, fetch the local subnet and scan without forcing a rescan.
+  // On mount, fetch subnet and scan if devices not cached.
   useEffect(() => {
     (async () => {
       const localSubnet = await fetchLocalSubnet();
       if (localSubnet) {
-        // On initial load, do not force a rescan (allow cached devices if available).
         await scanNetwork(localSubnet, false);
       }
     })();
@@ -82,94 +74,203 @@ export default function HomePage() {
     setSubnet(e.target.value);
   };
 
-  // When the form is submitted, force a new scan.
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     scanNetwork(subnet, true);
+    setControlMessage('');
+    setSelectedControlDevice(null);
+    setPushResult('');
+    setDevices([]); // clear devices on new scan
+    setSelectedPushIps([]); // reset selections on new scan
   };
 
-  // Handle card click: open a modal (or pop-up) to set the control device.
-  const handleCardClick = (device: Device) => {
-    setSelectedDevice(device);
+  // Toggle push selection via checkbox
+  const handleSelectToggle = (device: Device) => {
+    setSelectedPushIps((prev) => {
+      if (prev.includes(device.ip)) {
+        return prev.filter(ip => ip !== device.ip);
+      } else {
+        return [...prev, device.ip];
+      }
+    });
+  };
+
+  const handleSelectAllToggle = (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.checked) {
+      // Select all device IPs
+      setSelectedPushIps(devices.map((device) => device.ip));
+    } else {
+      setSelectedPushIps([]);
+    }
+  };
+
+  // When user clicks "Set as Control" button on a card.
+  const handleSetControlClick = (device: Device) => {
+    setSelectedControlDevice(device);
   };
 
   // API call to set the control device.
-  const handleSetControl = async () => {
-    if (!selectedDevice) return;
+  const handleConfirmControl = async () => {
+    if (!selectedControlDevice) return;
     try {
       const res = await fetch(
-        `http://127.0.0.1:8000/set-control?ip=${selectedDevice.ip}&magewell_id=${selectedDevice.name}`,
+        `http://127.0.0.1:8000/set-control?ip=${selectedControlDevice.ip}&magewell_id=${selectedControlDevice.name}`
       );
       if (!res.ok) {
         throw new Error(`HTTP error! Status: ${res.statusText}`);
       }
       const data = await res.json();
       console.log('Set control device response:', data);
-      setControlMessage(`Control device set to ${selectedDevice.ip} - ${selectedDevice.name}`);
+      // Check if the response contains an error message
+      if (data.error) {
+        setControlMessage(`Error: ${data.error}`);
+      } else {
+        setControlMessage(
+          `Control device set to ${selectedControlDevice.ip} - ${selectedControlDevice.name}`
+        );
+      }
     } catch (err: unknown) {
       console.error('Error setting control device:', err);
       setControlMessage('Error setting control device');
     } finally {
-      setSelectedDevice(null); // Close modal.
+      setSelectedControlDevice(null);
     }
   };
+  
 
-  const handleCloseModal = () => {
-    setSelectedDevice(null);
+  const handleCloseControlModal = () => {
+    setSelectedControlDevice(null);
   };
 
+  // Push updates to selected devices.
+  const pushUpdates = async () => {
+    if (selectedPushIps.length === 0) {
+      setPushResult("No devices selected for push updates.");
+      return;
+    }
+    try {
+      // Filter devices based on selected IPs and map them to include both ip and magewell_id (from name)
+      const devicesToUpdate = devices
+        .filter((device) => selectedPushIps.includes(device.ip))
+        .map((device) => ({
+          ip: device.ip,
+          magewell_id: device.name,
+        }));
+          
+      const res = await fetch("http://127.0.0.1:8000/push-updates", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(devicesToUpdate),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP error! Status: ${res.statusText}`);
+      }
+      const data = await res.json();
+      console.log("Push updates result:", data);
+      // Check if the response includes an error message.
+      if (data.error) {
+        setPushResult(`Error: ${data.error}`);
+      } else {
+        setPushResult("Push updates successful");
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setPushResult(`Error pushing updates: ${err.message}`);
+      } else {
+        setPushResult("Unknown error pushing updates");
+      }
+    }
+  };
+  
+  
+
   return (
-    <div className={styles.page}>
-      <h1 className={styles.headWrapper}>Magewell Device Scanner</h1>
-      <form onSubmit={handleSubmit}>
-        <label htmlFor="subnet" className={styles.label}>
-          Subnet to scan:
-        </label>
-        <input
-          id="subnet"
-          type="text"
-          value={subnet}
-          onChange={handleSubnetChange}
-          className={styles.input}
-          placeholder="Enter subnet (e.g., 172.16.6.0/23)"
-        />
-        <button type="submit" className={styles.button28}>
-          Rescan Network
-        </button>
-      </form>
-      {controlMessage && <p className={styles.controlMessage}>{controlMessage}</p>}
-      <div className={styles.tableWrapper}>
+    <div className={styles.main}>
+      <div className={styles.formWrapper}>
+        <form onSubmit={handleSubmit}>
+          <label htmlFor="subnet" className={styles.label}>
+            Subnet to scan:
+          </label>
+          <input
+            id="subnet"
+            type="text"
+            value={subnet}
+            onChange={handleSubnetChange}
+            className={styles.input}
+            placeholder="Enter subnet (e.g., 172.16.6.0/23)"
+          />
+          <button type="submit" className={styles.button28}>
+            Rescan Network
+          </button>
+        </form>
+      </div>
+      <div className={styles.messageWrapper}>
+        <p className={styles.count}>
+          Found {devices.length} device{devices.length !== 1 && "s"}.
+        </p>
+        {controlMessage && <div className={styles.controlMessage}>{controlMessage}</div>}
+      </div>
+      <div className={styles.gridWrapper}>
         {loading ? (
           <>
-          <p className={styles.count}>Scanning...</p>
-          <WaterfallIcon />
+            <p className={styles.count}>Scanning...</p>
+            <WaterfallIcon />
           </>
         ) : devices.length > 0 ? (
           <>
-            <p className={styles.count}>
-              Found {devices.length} device{devices.length !== 1 && 's'}.
-            </p>
-            <DeviceGrid devices={devices} onCardClick={handleCardClick} />
+            <DeviceGrid 
+              devices={devices} 
+              selectedDeviceIps={selectedPushIps} 
+              onSelectToggle={handleSelectToggle}
+              onSetControl={handleSetControlClick}
+            />
+            
           </>
         ) : (
           <p>No devices found.</p>
         )}
       </div>
       {error && <p className={styles.error}>Error: {error}</p>}
+      <div className={styles.selectAllContainer}>
+              <input 
+                type="checkbox" 
+                id="select-all"
+                checked={selectedPushIps.length === devices.length && devices.length > 0}
+                onChange={handleSelectAllToggle}
+                className={styles.checkbox}
+              />
+              <label htmlFor="select-all" className={styles.checkboxLabel}>
+                Select All
+              </label>
+            </div>
+      <div className={styles.pushContainer}>
+        <h2>Selected for Updates: {selectedPushIps.length}</h2>
+        {selectedPushIps.length > 0 && (
+          <ul className={styles.selectedList}>
+            {selectedPushIps.map(ip => {
+              const device = devices.find(d => d.ip === ip);
+              return <li key={ip}>{device?.name || ""} - {ip}</li>;
+            })}
+          </ul>
+        )}
+        <button onClick={pushUpdates} className={styles.button28}>
+          Push Settings
+        </button>
+        {pushResult && <p className={styles.pushResult}>{pushResult}</p>}
+      </div>
       {/* Modal for setting control device */}
-      {selectedDevice && (
-        <div className={styles.modalOverlay} onClick={handleCloseModal}>
+      {selectedControlDevice && (
+        <div className={styles.modalOverlay} onClick={handleCloseControlModal}>
           <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
             <h2>Set Control Device</h2>
             <p>
-              Set <strong>{selectedDevice.name || "Unnamed Device"}</strong> (
-              {selectedDevice.ip}) as the control device?
+              Set <strong>{selectedControlDevice.name || "Unnamed Device"}</strong> ({selectedControlDevice.ip}) as the control device?
             </p>
             <div className={styles.modalButtons}>
-              <button onClick={handleCloseModal} className={styles.button28}>
+              <button onClick={handleCloseControlModal} className={styles.button28}>
                 Cancel
               </button>
-              <button onClick={handleSetControl} className={styles.button28}>
+              <button onClick={handleConfirmControl} className={styles.button28}>
                 Confirm
               </button>
             </div>

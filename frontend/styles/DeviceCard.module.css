@@ -3,7 +3,6 @@
     padding: 1rem;
     border: 1px solid #ddd;
     border-radius: 0.5rem;
-    cursor: pointer;
     transition: box-shadow 0.2s ease;
   }
   
@@ -13,11 +12,47 @@
   
   .cardName {
     font-size: 1.5rem;
-    margin-bottom: 0.5rem;
+    margin: 0;
   }
   
   .cardIp {
     font-size: 1rem;
-    color: #d2d2d2;
+    color: #555;
+    margin: 0.5rem 0;
   }
   
+  .cardFooter {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: auto;
+  }
+  
+  .checkboxContainer {
+    display: flex;
+    align-items: center;
+  }
+  
+  .checkbox {
+    margin-right: 0.5rem;
+    accent-color: #ff9800
+  }
+  
+  .checkboxLabel {
+    font-size: 0.9rem;
+  }
+  
+  .controlButton {
+    background-color: #ff9800;
+    border: none;
+    color: #fff;
+    padding: 0.5rem 1rem;
+    border-radius: 0.3rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  
+  .controlButton:hover {
+    background-color: #e68900;
+  }

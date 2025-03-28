@@ -328,3 +328,54 @@ async def set_control(
     app.state.control_settings = new_settings
     logger.info(f"Control device set for magewell_id {magewell_id}. New bulk update settings: {new_settings}")
     return {"message": f"Control device set. New settings for magewell_id {magewell_id} updated.", "settings": new_settings}
+
+@app.post("/push-updates")
+async def push_updates(selected_devices: list[dict]):
+    """
+    Push updates to the selected devices. Each object in selected_devices should contain
+    at least:
+      - "ip": the device IP
+      - "magewell_id": the device's ID (to be used for dynamic fields)
+      
+    For each device, merge the default settings (for that device) with the stored control settings,
+    and then push out the merged settings using import_settings_call.
+    """
+    if not hasattr(app.state, "control_settings") or not app.state.control_settings:
+        return {"error": "Control settings not set. Please set a control device first."}
+    
+    control_settings = app.state.control_settings
+    logger.info(f"Pushing updates using control settings: {control_settings}")
+    
+    connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+    results = []
+    async with aiohttp.ClientSession(connector=connector) as session:
+        # Process each selected device concurrently.
+        tasks = []
+        for device in selected_devices:
+            ip = device.get("ip")
+            magewell_id = device.get("magewell_id")
+            # Merge settings for the target device using its own magewell_id.
+            merged_settings = get_bulk_update_settings(magewell_id, control_settings)
+            logger.info(f"Merged settings for device {magewell_id} ({ip}): {merged_settings}")
+            # Create a task to login and then push the merged settings.
+            tasks.append(push_update_for_device(session, ip, magewell_id, merged_settings))
+        task_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in task_results:
+            results.append(res)
+    return {"results": results}
+
+
+async def push_update_for_device(session: aiohttp.ClientSession, magewell_ip: str, magewell_id: str, settings: dict) -> dict:
+    username = "Admin"
+    plaintext_password = "bl4z35"
+    try:
+        cookie_header = await login_device(session, magewell_ip, username, md5_hash(plaintext_password), magewell_id)
+    except Exception as e:
+        logger.error(f"Login failed for device {magewell_id} ({magewell_ip}): {e}")
+        return {"ip": magewell_ip, "magewell_id": magewell_id, "status": "login failed", "error": str(e)}
+    try:
+        await import_settings_call(session, magewell_ip, settings, cookie_header, magewell_id)
+        return {"ip": magewell_ip, "magewell_id": magewell_id, "status": "updated"}
+    except Exception as e:
+        logger.error(f"Update failed for device {magewell_id} ({magewell_ip}): {e}")
+        return {"ip": magewell_ip, "magewell_id": magewell_id, "status": "update failed", "error": str(e)}

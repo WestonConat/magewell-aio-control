@@ -12,7 +12,7 @@ export default function NavMenu() {
         </li>
         <li>|</li>
         <li className={styles.menuItem}>
-          <Link href="/bulk-update">Bulk Update</Link>
+          <Link href="/bulk-update">CSV Update</Link>
         </li>
         {/* Add additional menu items here if needed */}
       </ul>
