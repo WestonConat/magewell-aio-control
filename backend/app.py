@@ -1,4 +1,5 @@
 import csv
+import json
 import hashlib
 import asyncio
 import ipaddress
@@ -10,7 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Query, UploadFile, File
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from yarl import URL
+from bs4 import BeautifulSoup
 from .magewell_settings import get_modified_settings
+from .settings_merge import get_bulk_update_settings
 
 
 app = FastAPI()
@@ -82,41 +85,64 @@ async def import_settings_call(session: aiohttp.ClientSession, magewell_ip: str,
         return result
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), retry=retry_if_exception_type(aiohttp.ClientError))
-async def get_device_settings_with_login(session: aiohttp.ClientSession, magewell_ip: str, timeout: float = 2.0) -> dict:
+async def get_device_report_with_login(session: aiohttp.ClientSession, magewell_ip: str, timeout: float = 2.0) -> dict:
     """
-    Login to the device and then retrieve its settings.
+    Login to the device and then retrieve its report using get-report.
+    Parses the returned HTML to extract the SETTINGS section JSON,
+    and returns that JSON as a dict.
     """
     username = "Admin"
     plaintext_password = "bl4z35"
     hashed_password = md5_hash(plaintext_password)
     try:
-        # Login to get the auth cookie
         cookie_header = await login_device(session, magewell_ip, username, hashed_password, magewell_ip)
     except Exception as e:
-        logger.error(f"Login failed for {magewell_ip} when fetching settings: {e}")
+        logger.error(f"Login failed for {magewell_ip} when fetching report: {e}")
         return {}
     
-    # Now call the get-settings endpoint with the auth cookie.
-    url = f"http://{magewell_ip}/usapi?method=get-settings"
+    url = f"http://{magewell_ip}/usapi?method=get-report"
     headers = {
-        "Accept": "application/json",
+        "Accept": "text/html",
         "User-Agent": "curl/7.68.0",
         "Cookie": cookie_header,
     }
     try:
-        # First, await the GET request with a timeout.
         const_response = await asyncio.wait_for(
             session.get(url, timeout=timeout, headers=headers, allow_redirects=False),
             timeout=timeout
         )
-        # Then, use the response as an async context manager.
         async with const_response as response:
             response.raise_for_status()
-            data = await response.json()
-            logger.info(f"Got settings from {magewell_ip}: {data}")
-            return data
+            html = await response.text()
+            logger.info(f"Got report from {magewell_ip}")
+            soup = BeautifulSoup(html, "html.parser")
+            # Look for the report-content div and then find the content-level1 div with h2 == "SETTINGS"
+            report_content = soup.find("div", class_="report-content")
+            if not report_content:
+                logger.error(f"No report-content found for {magewell_ip}")
+                return {}
+            settings_div = None
+            for div in report_content.find_all("div", class_="content-level1"):
+                h2 = div.find("h2")
+                if h2 and h2.get_text(strip=True).upper() == "SETTINGS":
+                    settings_div = div
+                    break
+            if not settings_div:
+                logger.error(f"No SETTINGS section found for {magewell_ip}")
+                return {}
+            pre = settings_div.find("pre", class_="json")
+            if not pre:
+                logger.error(f"No JSON pre tag found in SETTINGS for {magewell_ip}")
+                return {}
+            settings_json = pre.get_text(strip=True)
+            try:
+                settings_data = json.loads(settings_json)
+            except Exception as json_err:
+                logger.error(f"Error parsing JSON in SETTINGS for {magewell_ip}: {json_err}")
+                return {}
+            return settings_data
     except Exception as e:
-        logger.error(f"Error fetching settings for {magewell_ip}: {e}")
+        logger.error(f"Error fetching report for {magewell_ip}: {e}")
         return {}
 
 
@@ -168,7 +194,16 @@ async def process_device(row: dict, session: aiohttp.ClientSession):
         logger.error(f"Login failed for device {magewell_id}: {e}")
         return
 
-    modified_settings = get_modified_settings(magewell_id)
+    # Instead of directly calling get_modified_settings, we merge control settings if available.
+    control_settings = getattr(app.state, "control_settings", None)
+    if control_settings:
+        # Use the current device's magewell_id to build settings while merging in the control device's settings.
+        modified_settings = get_bulk_update_settings(magewell_id, control_settings)
+        logger.info(f"Using merged control settings for device {magewell_id}: {modified_settings}")
+    else:
+        modified_settings = get_modified_settings(magewell_id)
+        logger.info(f"Using default settings for device {magewell_id}: {modified_settings}")
+    
     try:
         await import_settings_call(session, magewell_ip, modified_settings, cookie_header, magewell_id)
     except Exception as e:
@@ -185,6 +220,19 @@ async def run_bulk_update(devices: list):
         tasks = [asyncio.create_task(limited_process_device(row, session, sem)) for row in devices]
         await asyncio.gather(*tasks)
 
+
+
+def update_control_settings(magewell_id: str, control_settings: dict) -> dict:
+    """
+    Get the default settings for the given magewell_id (from magewell_settings.py)
+    and overwrite its keys with those from control_settings.
+    Returns the merged settings.
+    """
+    default_settings = get_modified_settings(magewell_id)
+    # A shallow merge: keys in control_settings override those in default_settings.
+    merged_settings = {**default_settings, **control_settings}
+    return merged_settings
+
 # --- FastAPI Endpoints ---
 
 @app.post("/bulk-update")
@@ -199,10 +247,15 @@ async def bulk_update(file: UploadFile = File(...)):
 @app.get("/discover-magewell")
 async def discover_magewell(
     subnet: str = Query("172.16.6.0/23", description="Subnet to scan, e.g., 172.16.6.0/23"),
+    rescan: bool = Query(False, description="Force a new scan"),
     per_ip_timeout: float = Query(1.0, description="Timeout for each ping request"),
     max_concurrent: int = Query(50, description="Max concurrent ping tasks"),
-    settings_timeout: float = Query(2.0, description="Timeout for each get-settings request")
+    settings_timeout: float = Query(2.0, description="Timeout for each get-report request")
 ):
+    # If not rescan and devices are cached, return the cached devices.
+    if not rescan and hasattr(app.state, "devices") and app.state.devices:
+        return {"devices": app.state.devices}
+
     try:
         network = ipaddress.ip_network(subnet, strict=False)
     except Exception as e:
@@ -213,27 +266,65 @@ async def discover_magewell(
     sem = asyncio.Semaphore(max_concurrent)
     
     async with aiohttp.ClientSession(connector=connector) as session:
+        # Discover devices using ping
         ping_tasks = [sem_ping(sem, session, str(ip), per_ip_timeout) for ip in ips]
         ping_results = await asyncio.gather(*ping_tasks, return_exceptions=True)
         magewell_ips = [str(ip) for ip, is_magewell in zip(ips, ping_results) if is_magewell is True]
         logger.info(f"Discovered Magewell devices: {magewell_ips}")
 
-        settings_tasks = [get_device_settings_with_login(session, ip, settings_timeout) for ip in magewell_ips]
-        settings_results = await asyncio.gather(*settings_tasks, return_exceptions=True)
+        # For each discovered device, retrieve the report via get-report (which contains SETTINGS).
+        report_tasks = [get_device_report_with_login(session, ip, settings_timeout) for ip in magewell_ips]
+        report_results = await asyncio.gather(*report_tasks, return_exceptions=True)
 
     devices = []
-    for ip, settings in zip(magewell_ips, settings_results):
-        if isinstance(settings, Exception):
-            logger.error(f"Exception fetching settings for {ip}: {repr(settings)}")
+    for ip, report in zip(magewell_ips, report_results):
+        if isinstance(report, Exception):
+            logger.error(f"Exception fetching report for {ip}: {repr(report)}")
             device_name = ""
-        elif isinstance(settings, dict):
-            device_name = settings.get("name", "")
+            settings_dict = {}
+        elif isinstance(report, dict):
+            device_name = report.get("name", "")
+            settings_dict = report  # Store the entire settings dictionary.
         else:
             device_name = ""
-        devices.append({"ip": ip, "name": device_name})
+            settings_dict = {}
+        devices.append({"ip": ip, "name": device_name, "settings": settings_dict})
     
+    # Cache discovered devices
+    app.state.devices = devices
     return {"devices": devices}
+
 
 @app.get("/local-subnet")
 async def local_subnet():
     return {"local_subnet": LOCAL_SUBNET}
+
+@app.get("/set-control")
+async def set_control(
+    ip: str = Query(..., description="IP address of the control device"),
+    magewell_id: str = Query(..., description="Target magewell_id for bulk updates")
+):
+    """
+    Set the control device.
+    Look up the device in the cached devices; use its SETTINGS dict as the control settings.
+    Then, generate new settings for a target magewell_id by merging in the control settings
+    into the default settings (from get_modified_settings) while preserving dynamic fields.
+    Store the merged settings in app.state.control_settings.
+    """
+    if not hasattr(app.state, "devices") or not app.state.devices:
+        return {"error": "No devices cached. Please run a network scan first."}
+    
+    # Look up the control device by its IP.
+    devices = app.state.devices
+    control_device = next((d for d in devices if d["ip"] == ip), None)
+    if not control_device:
+        return {"error": f"Device with IP {ip} not found in cache."}
+    
+    control_settings = control_device.get("settings", {})
+    # Merge control device settings into the default for the given magewell_id.
+    new_settings = get_bulk_update_settings(magewell_id, control_settings)
+    
+    # Cache the new settings in app.state for later bulk update use.
+    app.state.control_settings = new_settings
+    logger.info(f"Control device set for magewell_id {magewell_id}. New bulk update settings: {new_settings}")
+    return {"message": f"Control device set. New settings for magewell_id {magewell_id} updated.", "settings": new_settings}

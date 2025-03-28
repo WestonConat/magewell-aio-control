@@ -1,0 +1,23 @@
+.card {
+    background-color: #1b1b1b;
+    padding: 1rem;
+    border: 1px solid #ddd;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition: box-shadow 0.2s ease;
+  }
+  
+  .card:hover {
+    outline: 3px solid #ddd;
+  }
+  
+  .cardName {
+    font-size: 1.5rem;
+    margin-bottom: 0.5rem;
+  }
+  
+  .cardIp {
+    font-size: 1rem;
+    color: #d2d2d2;
+  }
+  
