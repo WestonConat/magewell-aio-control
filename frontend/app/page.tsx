@@ -227,7 +227,7 @@ export default function HomePage() {
             
           </>
         ) : (
-          <p>No devices found.</p>
+          <p className={styles.count}>No devices found.</p>
         )}
       </div>
       {error && <p className={styles.error}>Error: {error}</p>}

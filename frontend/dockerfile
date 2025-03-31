@@ -1,0 +1,43 @@
+# Stage 1: Building the app
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files and install dependencies
+COPY frontend/package*.json ./
+
+# Install dependencies in the image
+RUN npm install --omit=dev
+
+# Copy the rest of the frontend code and build the app
+COPY frontend/ .
+RUN npm run build
+
+# Stage 2: Set up the runtime environment
+FROM node:20-alpine AS runner
+
+# Create a non-root user and switch to it
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nextjs -u 1001 -G nodejs
+
+# Set permissions for the nextjs user
+RUN mkdir -p /app/.next/cache/fetch-cache /app/.next/cache/images && \
+    chown -R nextjs:nodejs /app/.next/cache
+
+
+USER nextjs
+
+WORKDIR /app
+
+
+# Copy the built app and public assets from the builder stage
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/node_modules ./node_modules
+
+# Expose port 3000 for the app
+EXPOSE 3000
+
+# Command to run app
+CMD ["npm", "start"]

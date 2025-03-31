@@ -1,4 +1,5 @@
 import csv
+import os
 import json
 import hashlib
 import asyncio
@@ -36,16 +37,27 @@ logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
 
-def get_local_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def get_local_ip():
+    # Use the environment variable if provided
+    host_ip = os.environ.get("LOCAL_HOST_IP")
+    if host_ip:
+        return host_ip
+
     try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-    except Exception:
-        ip = "127.0.0.1"
-    finally:
-        s.close()
-    return ip
+        # Try resolving host.docker.internal
+        host_ip = socket.gethostbyname("host.docker.internal")
+        return host_ip
+    except socket.gaierror:
+        # Fallback: Use a UDP socket to determine local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(('8.8.8.8', 80))
+            host_ip = s.getsockname()[0]
+        except Exception:
+            host_ip = '127.0.0.1'
+        finally:
+            s.close()
+        return host_ip
 
 def get_local_subnet(prefix_length: int = 23) -> str:
     local_ip = get_local_ip()
