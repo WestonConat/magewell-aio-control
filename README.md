@@ -28,8 +28,8 @@ This tool provides a user-friendly interface to scan your local network for Mage
     Open your terminal and run:
     
     ```bash
-    git clone <repository-url>
-    cd <repository-directory>
+    git clone https://github.com/WestonConat/magewell-aio-control.git
+    cd magewell-aio-control
     ```
     
 2. **Configure Environment (Optional)**
