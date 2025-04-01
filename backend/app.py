@@ -16,55 +16,97 @@ from bs4 import BeautifulSoup
 from .magewell_settings import get_modified_settings
 from .settings_merge import get_bulk_update_settings
 
-
-app = FastAPI()
-
-origins = [
-    "http://localhost:3000",  # Adjust if your Next.js dev server runs on a different port/host
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,      # Allow these origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Configure logging
+# --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
 
-def get_local_ip():
-    # Use the environment variable if provided
+def get_local_ip() -> str:
+    """Determine the local IP address using an environment variable, DNS, or socket fallback."""
     host_ip = os.environ.get("LOCAL_HOST_IP")
     if host_ip:
         return host_ip
-
     try:
-        # Try resolving host.docker.internal
-        host_ip = socket.gethostbyname("host.docker.internal")
-        return host_ip
+        return socket.gethostbyname("host.docker.internal")
     except socket.gaierror:
-        # Fallback: Use a UDP socket to determine local IP
+        # Fallback: use UDP socket to determine local IP
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect(('8.8.8.8', 80))
-            host_ip = s.getsockname()[0]
+            return s.getsockname()[0]
         except Exception:
-            host_ip = '127.0.0.1'
+            return '127.0.0.1'
         finally:
             s.close()
-        return host_ip
 
-def get_local_subnet(prefix_length: int = 23) -> str:
-    local_ip = get_local_ip()
-    network = ipaddress.ip_network(f"{local_ip}/{prefix_length}", strict=False)
-    return str(network)
+def get_allowed_subnet(default_prefix: int = 23) -> str:
+    """
+    Returns the allowed subnet in CIDR notation.
+    
+    If ALLOWED_SUBNET is provided as an environment variable (e.g. "172.16.6.0/23"),
+    it is used directly. Otherwise, it constructs a CIDR using the local IP
+    (determined by get_local_ip()) and the default prefix.
+    """
+    allowed_subnet = os.environ.get("ALLOWED_SUBNET")
+    if not allowed_subnet:
+        local_ip = get_local_ip()
+        allowed_subnet = f"{local_ip}/{default_prefix}"
+        logger.info(f"No ALLOWED_SUBNET set; using computed local subnet: {allowed_subnet}")
+    else:
+        logger.info(f"Using ALLOWED_SUBNET environment variable: {allowed_subnet}")
+    return allowed_subnet
 
-LOCAL_SUBNET = get_local_subnet(23)
+def cidr_to_regex(cidr: str) -> str:
+    """
+    Convert a CIDR (e.g. '172.16.6.0/23') into a regex that matches any IP in that network.
+    Supports /16, /23, and /24.
+    """
+    network = ipaddress.ip_network(cidr)
+    if network.prefixlen == 24:
+        A, B, C, _ = str(network.network_address).split(".")
+        return f"{A}\\.{B}\\.{C}\\.(\\d{{1,3}})(:\\d+)?"
+    elif network.prefixlen == 23:
+        A, B, C, _ = str(network.network_address).split(".")
+        allowed_third = f"({C}|{int(C)+1})"
+        return f"{A}\\.{B}\\.{allowed_third}\\.(\\d{{1,3}})(:\\d+)?"
+    elif network.prefixlen == 16:
+        A, B, _, _ = str(network.network_address).split(".")
+        return f"{A}\\.{B}\\.(\\d{{1,3}})\\.(\\d{{1,3}})(:\\d+)?"
+    else:
+        raise ValueError(f"CIDR mask /{network.prefixlen} not supported by this function")
+
+def get_allowed_origin_regex(default_prefix: int = 23) -> str:
+    """
+    Build and return a composite regex for allowed origins.
+    
+    It uses ALLOWED_SUBNET if provided; otherwise, it calculates the local subnet using get_local_ip()
+    and the default prefix. The resulting CIDR is converted to a regex via cidr_to_regex and combined
+    with a localhost pattern.
+    """
+    allowed_subnet = get_allowed_subnet(default_prefix)
+    try:
+        subnet_regex = cidr_to_regex(allowed_subnet)
+    except ValueError as e:
+        raise ValueError(f"Error processing allowed subnet: {e}")
+    # Composite regex allowing either localhost (with optional port) or an IP in the subnet.
+    composite_regex = f"^http://(localhost(:\\d+)?|{subnet_regex})$"
+    return composite_regex
+
+# Get the composite regex to be used by CORSMiddleware.
+allowed_origin_regex = get_allowed_origin_regex()
+
+# --- FastAPI App Setup ---
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=allowed_origin_regex,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 def md5_hash(password: str) -> str:
     return hashlib.md5(password.encode('utf-8')).hexdigest()
@@ -309,7 +351,7 @@ async def discover_magewell(
 
 @app.get("/local-subnet")
 async def local_subnet():
-    return {"local_subnet": LOCAL_SUBNET}
+    return {"local_subnet": get_allowed_subnet()}
 
 @app.get("/set-control")
 async def set_control(

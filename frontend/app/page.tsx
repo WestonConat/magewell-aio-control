@@ -6,6 +6,8 @@ import { Device } from '@/components/DeviceCard';
 import styles from './page.module.css';
 import WaterfallIcon from '@/components/Waterfall';
 
+const publicBackendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || '127.0.0.1';
+
 export default function HomePage() {
   const [loading, setLoading] = useState<boolean>(false);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -19,7 +21,7 @@ export default function HomePage() {
   // Fetch local subnet
   const fetchLocalSubnet = async (): Promise<string | null> => {
     try {
-      const res = await fetch('http://127.0.0.1:8000/local-subnet');
+      const res = await fetch(`http://${publicBackendUrl}:8000/local-subnet`);
       if (!res.ok) {
         throw new Error(`HTTP error! Status: ${res.statusText}`);
       }
@@ -43,7 +45,7 @@ export default function HomePage() {
     setError('');
     console.log('Scanning network for subnet:', subnetToScan, 'forceRescan:', forceRescan);
     try {
-      const url = `http://127.0.0.1:8000/discover-magewell?subnet=${encodeURIComponent(
+      const url = `http://${publicBackendUrl}:8000/discover-magewell?subnet=${encodeURIComponent(
         subnetToScan
       )}&per_ip_timeout=1.0&max_concurrent=50&rescan=${forceRescan}`;
       const res = await fetch(url);
@@ -114,7 +116,7 @@ export default function HomePage() {
     if (!selectedControlDevice) return;
     try {
       const res = await fetch(
-        `http://127.0.0.1:8000/set-control?ip=${selectedControlDevice.ip}&magewell_id=${selectedControlDevice.name}`
+        `http://${publicBackendUrl}:8000/set-control?ip=${selectedControlDevice.ip}&magewell_id=${selectedControlDevice.name}`
       );
       if (!res.ok) {
         throw new Error(`HTTP error! Status: ${res.statusText}`);
@@ -157,7 +159,7 @@ export default function HomePage() {
           magewell_id: device.name,
         }));
           
-      const res = await fetch("http://127.0.0.1:8000/push-updates", {
+      const res = await fetch(`http://${publicBackendUrl}:8000/push-updates`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(devicesToUpdate),
@@ -230,7 +232,7 @@ export default function HomePage() {
           <p className={styles.count}>No devices found.</p>
         )}
       </div>
-      {error && <p className={styles.error}>Error: {error}</p>}
+      {error && <p className={styles.count}>Error: {error}</p>}
       <div className={styles.selectAllContainer}>
               <input 
                 type="checkbox" 

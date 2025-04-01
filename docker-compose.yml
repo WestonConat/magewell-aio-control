@@ -8,14 +8,22 @@ services:
       - "8000:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Set the default subnet to scan for devices and allow CORS
     environment:
-      - LOCAL_HOST_IP=172.16.6.0
+      - ALLOWED_SUBNET=172.16.6.0/23
 
   frontend:
     build:
       context: .
       dockerfile: frontend/dockerfile
+    # Port 80 allows UI access via the host IP without specifying a port
+    # Change this value if the host has another service using port 80.
     ports:
-      - "3000:3000"
+      - "80:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # The frontend client needs to know the backend (host) IP Address
+    environment:
+      - "NEXT_PUBLIC_BACKEND_URL=172.16.7.157"
     depends_on:
       - backend
