@@ -65,7 +65,7 @@ def get_report(ip: str, cookie_header: str) -> dict:
     return sections
 
 if __name__ == "__main__":
-    test_ip = "172.16.6.208"  # Replace with a valid device IP for testing.
+    test_ip = "172.16.6.199"  # Replace with a valid device IP for testing.
     cookie_header = login_device(test_ip, "Admin", "bl4z35")
     if cookie_header:
         report = get_report(test_ip, cookie_header)

@@ -17,7 +17,7 @@ from .magewell_settings import get_modified_settings
 from .settings_merge import get_bulk_update_settings
 
 # --- Logging Setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Utility Functions ---
@@ -62,7 +62,7 @@ def cidr_to_regex(cidr: str) -> str:
     Convert a CIDR (e.g. '172.16.6.0/23') into a regex that matches any IP in that network.
     Supports /16, /23, and /24.
     """
-    network = ipaddress.ip_network(cidr)
+    network = ipaddress.ip_network(cidr, strict=False)
     if network.prefixlen == 24:
         A, B, C, _ = str(network.network_address).split(".")
         return f"{A}\\.{B}\\.{C}\\.(\\d{{1,3}})(:\\d+)?"
@@ -169,6 +169,7 @@ async def get_device_report_with_login(session: aiohttp.ClientSession, magewell_
             response.raise_for_status()
             html = await response.text()
             logger.info(f"Got report from {magewell_ip}")
+            logger.info(f"Raw report HTML from {magewell_ip}: {html}")
             soup = BeautifulSoup(html, "html.parser")
             # Look for the report-content div and then find the content-level1 div with h2 == "SETTINGS"
             report_content = soup.find("div", class_="report-content")
@@ -189,11 +190,13 @@ async def get_device_report_with_login(session: aiohttp.ClientSession, magewell_
                 logger.error(f"No JSON pre tag found in SETTINGS for {magewell_ip}")
                 return {}
             settings_json = pre.get_text(strip=True)
+            logger.info(f"Extracted SETTINGS JSON from {magewell_ip}: {settings_json}")
             try:
                 settings_data = json.loads(settings_json)
             except Exception as json_err:
                 logger.error(f"Error parsing JSON in SETTINGS for {magewell_ip}: {json_err}")
                 return {}
+            logger.info(f"Settings keys from {magewell_ip}: {list(settings_data.keys())}")
             return settings_data
     except Exception as e:
         logger.error(f"Error fetching report for {magewell_ip}: {e}")
