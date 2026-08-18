@@ -113,11 +113,8 @@ def get_modified_settings(magewell_id: str) -> dict:
         ],
         "eth": {"is-dhcp": 1, "ip": "", "mask": "", "router": "", "dns": ""},
         "enable-station": 1,
-        "wifi": [
-            {"name": "Sector 2024", "passwd": "c2VjdG9yMjAyNA==", "identity": "", "freq": 0, "level": 0, "secu": 3, "is-auto": 1, "is-use": 0, "is-hide": 0, "is-dhcp": 1, "ip": "", "mask": "", "router": "", "dns": ""},
-            {"name": "BLACKHATEUROPE2024", "passwd": "QkhFVVJPUEUyMDI0", "identity": "", "freq": 0, "level": 0, "secu": 3, "is-auto": 1, "is-use": 0, "is-hide": 0, "is-dhcp": 1, "ip": "", "mask": "", "router": "", "dns": ""}
-        ],
-        "softap": {"is-softap": 0, "is-visible": 1, "softap-ssid": "B313231201201", "softap-passwd": "31201201"},
+        "wifi": [],
+        "softap": {"is-softap": 0, "is-visible": 1, "softap-ssid": "", "softap-passwd": ""},
         "rndis": {"ip": "192.168.66.1", "mask": "255.255.255.0"},
         "stream-server": [
             {"id": 0, "type": 121, "name": "SRT Listener", "is-use": 1, "port": 8000, "max-connections": 1, "latency": 200, "bandwidth": 25, "net-mode": 0, "stream-index": 1, "aes": 0, "aes-word": "", "mtu": 1496, "audio": 0, "audio-streams": 1, "is-media-hub": 0}

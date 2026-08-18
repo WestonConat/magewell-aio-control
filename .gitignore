@@ -51,6 +51,7 @@ dmypy.json
 .ipynb_checkpoints
 
 # Virtual environments
+.venv/
 venv/
 env/
 ENV/
@@ -76,6 +77,7 @@ build/
 dist/
 coverage/
 *.log
+*.tsbuildinfo
 yarn-error.log*
 npm-debug.log*
 pnpm-debug.log*

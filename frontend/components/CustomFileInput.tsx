@@ -1,16 +1,18 @@
 // File: components/CustomFileInput.tsx
-'use client';
+"use client";
 
-import { useRef, useState, ChangeEvent } from 'react';
-import styles from '@/app/page.module.css'
+import { useRef, useState, ChangeEvent } from "react";
+import styles from "@/app/page.module.css";
 
 interface CustomFileInputProps {
   onFileSelect: (file: File) => void;
 }
 
-export default function CustomFileInput({ onFileSelect }: CustomFileInputProps) {
+export default function CustomFileInput({
+  onFileSelect,
+}: CustomFileInputProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [fileName, setFileName] = useState<string>('No file chosen');
+  const [fileName, setFileName] = useState<string>("No file chosen");
 
   const handleButtonClick = () => {
     fileInputRef.current?.click();
@@ -28,11 +30,18 @@ export default function CustomFileInput({ onFileSelect }: CustomFileInputProps) 
     <>
       <input
         type="file"
+        accept=".csv,text/csv"
         ref={fileInputRef}
         onChange={handleFileChange}
-        style={{ display: 'none' }}
+        style={{ display: "none" }}
       />
-      <button className={styles.button28} onClick={handleButtonClick}>Browse...</button>
+      <button
+        className={styles.button28}
+        type="button"
+        onClick={handleButtonClick}
+      >
+        Browse...
+      </button>
       <span>{fileName}</span>
     </>
   );

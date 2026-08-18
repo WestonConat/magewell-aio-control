@@ -1,29 +1,38 @@
-
 services:
   backend:
     build:
       context: .
       dockerfile: backend/dockerfile
-    ports:
-      - "8000:8000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    # Set the default subnet to scan for devices and allow CORS
     environment:
-      - ALLOWED_SUBNET=172.16.6.0/23
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      ALLOWED_SUBNET: ${ALLOWED_SUBNET:-127.0.0.1/32}
+      ENABLE_DEVICE_WRITES: ${ENABLE_DEVICE_WRITES:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAGEWELL_PASSWORD: ${MAGEWELL_PASSWORD:-}
+      MAGEWELL_USERNAME: ${MAGEWELL_USERNAME:-}
+      MAX_SCAN_HOSTS: ${MAX_SCAN_HOSTS:-1024}
+      MAX_UPDATE_DEVICES: ${MAX_UPDATE_DEVICES:-100}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   frontend:
     build:
       context: .
       dockerfile: frontend/dockerfile
-    # Port 80 allows UI access via the host IP without specifying a port
-    # Change this value if the host has another service using port 80.
-    ports:
-      - "80:3000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    # The frontend client needs to know the backend (host) IP Address
-    environment:
-      - "NEXT_PUBLIC_BACKEND_URL=172.16.7.157"
+      args:
+        NEXT_PUBLIC_BACKEND_URL: ${BACKEND_PUBLIC_URL:-http://127.0.0.1:8000}
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
