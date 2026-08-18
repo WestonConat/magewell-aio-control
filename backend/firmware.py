@@ -261,8 +261,7 @@ def assert_idle_status(status: dict[str, Any], *, post_update: bool = False) -> 
     live_result = None
     if "result" in live_status:
         live_result = _required_int(live_status, "result", "live status")
-        allowed_live_results = (0, 27) if post_update else (27,)
-        if live_result not in allowed_live_results:
+        if live_result not in (0, 27):
             raise FirmwareSafetyError("Device live status is not in a known idle state.")
     if "run-ms" in live_status and _required_int(live_status, "run-ms", "live status") != 0:
         raise FirmwareSafetyError("Device live status reports elapsed streaming time.")
@@ -282,8 +281,7 @@ def assert_idle_status(status: dict[str, Any], *, post_update: bool = False) -> 
     record_result = None
     if "result" in record_status:
         record_result = _required_int(record_status, "result", "record status")
-        allowed_record_results = (0, 27) if post_update else (27,)
-        if record_result not in allowed_record_results:
+        if record_result not in (0, 27):
             raise FirmwareSafetyError("Device record status is not in a known idle state.")
     if "run-ms" in record_status and _required_int(record_status, "run-ms", "record status") != 0:
         raise FirmwareSafetyError("Device record status reports elapsed recording time.")

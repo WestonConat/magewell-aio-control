@@ -280,8 +280,7 @@ def test_documented_empty_and_configured_idle_activity_are_accepted() -> None:
     current_firmware_idle = valid_status()
     current_firmware_idle["live-status"]["result"] = 0
     current_firmware_idle["rec-status"].update({"result": 0, "run-ms": 0})
-    with pytest.raises(FirmwareSafetyError, match="live status"):
-        assert_idle_status(current_firmware_idle)
+    assert_idle_status(current_firmware_idle)
     assert_idle_status(current_firmware_idle, post_update=True)
 
 
@@ -311,6 +310,8 @@ def test_post_update_wrapper_result_zero_requires_empty_activity_lists() -> None
         }
     )
     with pytest.raises(FirmwareSafetyError, match="empty stream list"):
+        assert_idle_status(live)
+    with pytest.raises(FirmwareSafetyError, match="empty stream list"):
         assert_idle_status(live, post_update=True)
 
     recording = valid_status()
@@ -330,6 +331,8 @@ def test_post_update_wrapper_result_zero_requires_empty_activity_lists() -> None
             ],
         }
     )
+    with pytest.raises(FirmwareSafetyError, match="empty recording list"):
+        assert_idle_status(recording)
     with pytest.raises(FirmwareSafetyError, match="empty recording list"):
         assert_idle_status(recording, post_update=True)
 
