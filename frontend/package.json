@@ -6,12 +6,15 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint .",
+    "format": "prettier --write app/page.tsx app/bulk-update/page.tsx components/CustomFileInput.tsx eslint.config.mjs next.config.ts package.json tsconfig.json README.md",
+    "format:check": "prettier --check app/page.tsx app/bulk-update/page.tsx components/CustomFileInput.tsx eslint.config.mjs next.config.ts package.json tsconfig.json README.md",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "next": "15.2.4"
+    "next": "16.3.1"
   },
   "devDependencies": {
     "typescript": "^5",
@@ -19,7 +22,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "15.2.4",
-    "@eslint/eslintrc": "^3"
+    "eslint-config-next": "16.3.1",
+    "prettier": "3.6.2"
   }
 }

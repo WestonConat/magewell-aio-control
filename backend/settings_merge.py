@@ -1,5 +1,6 @@
 from .magewell_settings import get_modified_settings
 
+
 def get_bulk_update_settings(target_magewell_id: str, control_settings: dict) -> dict:
     """
     Generate the bulk update settings for a target device with magewell_id.
@@ -14,4 +15,3 @@ def get_bulk_update_settings(target_magewell_id: str, control_settings: dict) ->
             continue
         merged[key] = control_value
     return merged
-
