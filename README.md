@@ -32,7 +32,8 @@ must be treated as exposed and rotated before a live run.
 
    - set `ALLOWED_SUBNET` to the smallest exact CIDR that contains the intended devices;
    - set `MAGEWELL_USERNAME` and `MAGEWELL_PASSWORD`;
-   - keep `ENABLE_DEVICE_WRITES=false` during setup and read-only scanning;
+   - keep `ENABLE_DEVICE_WRITES=false`, `ENABLE_CREDENTIAL_ROTATION=false`, and
+     `ENABLE_FIRMWARE_UPDATES=false` during setup and read-only scanning;
    - keep the default ports unless they conflict locally.
 
 3. Validate and start:
@@ -83,6 +84,7 @@ NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000 npm --prefix frontend run dev
 | `MAGEWELL_OLD_PASSWORD` | empty | Temporary rotation input; inject only into the disposable backend process and never store it. |
 | `ENABLE_CREDENTIAL_ROTATION` | `false` | Separate lock for one-device-at-a-time password rotation; cannot be enabled with Camera-profile writes. |
 | `ENABLE_DEVICE_WRITES` | `false` | Camera-profile write boundary. Never enable it together with credential rotation. |
+| `ENABLE_FIRMWARE_UPDATES` | `false` | Single-device firmware boundary. Camera-profile writes and credential rotation must remain locked. |
 | `MAX_SCAN_HOSTS` | `1024` | Maximum hosts in one requested scan; hard ceiling is 4096. |
 | `MAX_UPDATE_DEVICES` | `100` | Maximum unique targets in one write request; hard ceiling is 500. |
 | `ALLOWED_ORIGINS` | local UI origins | Comma-separated exact browser origins allowed by CORS. |
@@ -114,6 +116,8 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Verify target | Performs up to three read-only report checks over a two-second settle window and compares SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write or mutation retry. |
 | Credential inventory | Authenticates each responder with the new credential first, then the old credential; no device write. |
 | Rotate one credential | Uses the authenticated admin `set-passwd` API exactly once, then verifies device identity with the new credential. |
+| Firmware preflight | Reads one device's identity, hardware, firmware, settings fingerprint, running state, and stream activity. |
+| Update one firmware target | Uploads one exact-hash `.mwf`, starts one install, waits through reboot, and verifies identity and firmware. Neither mutation is retried. |
 | CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
@@ -139,6 +143,64 @@ approved subnet and require every responder to report `old` or `new`. Submit one
 `rotated-and-verified`. Rotate subsequent `old` devices one at a time. Finish with a fresh
 inventory in which every device reports `new`, then remove the container. Never retry a
 device whose credential state is unknown without first running a fresh inventory.
+
+## Guarded firmware updates
+
+Firmware normalization uses the CLI instead of a bulk browser action. It accepts exactly
+one device and requires an exact IP, device name, target version, model/hardware/product
+identity, immutable serial/MAC identity, an approved `.mwf` manifest entry, and explicit
+`--confirm`. The approved manifest binds version 2.4.288 to Ultra Encode AIO hardware B,
+product 787, the manufacturer filename, exact byte size, official package URL, and SHA-256.
+The validated file descriptor is the one uploaded. It refuses to run while the device is
+streaming, checking/updating firmware, loading settings, resetting, formatting storage, or
+rebooting. It also refuses to run if Camera-profile writes or credential rotation are
+enabled.
+
+Keep all firmware archives outside the repository. First run the read-only preflight:
+
+```bash
+docker compose exec -T backend python -m backend.firmware_cli preflight-one \
+  --ip 192.0.2.10 \
+  --expected-name ENCODER-01 \
+  --target-version 2.4.288
+```
+
+For a controlled update, copy the manufacturer `.mwf` into the running backend, set only
+`ENABLE_FIRMWARE_UPDATES=true` in `.env`, recreate the backend, and verify `/healthz`
+reports firmware enabled with the other two mutation modes disabled. Then invoke:
+
+```bash
+docker compose exec -T backend python -m backend.firmware_cli update-one \
+  --ip 192.0.2.10 \
+  --expected-name ENCODER-01 \
+  --expected-serial SERIAL_FROM_PREFLIGHT \
+  --expected-eth-mac MAC_FROM_PREFLIGHT \
+  --target-version 2.4.288 \
+  --firmware /tmp/ultra_encode_aio_gen2_rev_b_2_4_288.mwf \
+  --confirm
+```
+
+The updater rechecks name, serial, Ethernet MAC, model, hardware, product, firmware, and a
+strict idle/non-streaming status in the same authenticated session immediately before upload.
+It writes a mode-`0600` settings backup and append-only effect journal below the mode-`0700`
+recovery root before uploading. The fixed serial/artifact receipt prevents concurrent or
+later duplicate mutation attempts, even from another CLI invocation. Copy the recovery data
+off the container after each device; the Compose named volume preserves it across container
+recreation:
+
+```bash
+docker compose cp backend:/var/lib/magewell-firmware-recovery \
+  /private/tmp/magewell-firmware-recovery
+```
+
+Magewell warns not to disconnect power or operate the unit during installation; a successful
+update reboots automatically. Exact post-reboot identity, credentials, version, idle state,
+and settings fingerprint are verified. Any settings change returns
+`firmware-verified-settings-changed` with key names only and stops fleet progression for
+operator review. If upload/install acceptance is ambiguous, the device does not return within
+ten minutes, its identity/version differs, or recovery is uncertain, do not retry. Relock
+firmware updates and recover that one device through the manufacturer UI or Magewell support
+before continuing. Firmware downgrade is not an assumed recovery path.
 
 ## Controlled live-run checklist
 

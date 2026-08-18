@@ -10,11 +10,11 @@ lint:
   npm --prefix frontend run lint
 
 format:
-  .venv/bin/ruff format backend/app.py backend/settings_merge.py backend/tests
+  .venv/bin/ruff format backend
   npm --prefix frontend run format
 
 format-check:
-  .venv/bin/ruff format --check backend/app.py backend/settings_merge.py backend/tests
+  .venv/bin/ruff format --check backend
   npm --prefix frontend run format:check
 
 typecheck:

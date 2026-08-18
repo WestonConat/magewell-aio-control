@@ -66,6 +66,13 @@ myenv/
 *.env.test
 *.env.production
 
+# Firmware recovery data contains full device settings and must never enter Git.
+magewell-firmware-recovery/
+**/pre-firmware-settings.json
+**/firmware-state.json
+**/firmware-events.jsonl
+**/effect.lock
+
 # VS Code settings
 .vscode/
 

@@ -11,9 +11,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the backend code
 COPY backend /app/backend
 
-RUN addgroup --system app && adduser --system --ingroup app app
+RUN addgroup --system app \
+    && adduser --system --ingroup app app \
+    && mkdir -p /var/lib/magewell-firmware-recovery \
+    && chown app:app /var/lib/magewell-firmware-recovery \
+    && chmod 0700 /var/lib/magewell-firmware-recovery
 USER app
 
 EXPOSE 8000
 CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000"]
-

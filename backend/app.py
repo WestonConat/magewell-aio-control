@@ -187,30 +187,50 @@ def ensure_unique_devices(devices: list[DeviceSelection]) -> None:
         )
 
 
-def require_device_writes(confirm: bool) -> None:
-    if not env_flag("ENABLE_DEVICE_WRITES"):
+EFFECT_MODE_FLAGS = {
+    "camera-profile": "ENABLE_DEVICE_WRITES",
+    "credential-rotation": "ENABLE_CREDENTIAL_ROTATION",
+    "firmware-update": "ENABLE_FIRMWARE_UPDATES",
+}
+EFFECT_MODE_LABELS = {
+    "camera-profile": "Device writes",
+    "credential-rotation": "Credential rotation",
+    "firmware-update": "Firmware updates",
+}
+
+
+def enabled_effect_modes() -> set[str]:
+    return {mode for mode, flag in EFFECT_MODE_FLAGS.items() if env_flag(flag)}
+
+
+def require_effect_mode(expected_mode: str) -> None:
+    enabled = enabled_effect_modes()
+    if enabled == {expected_mode}:
+        return
+    if len(enabled) > 1:
         raise HTTPException(
-            status_code=403,
-            detail="Device writes are locked. Set ENABLE_DEVICE_WRITES=true only for the controlled live run.",
+            status_code=409,
+            detail=(
+                "Invalid effect configuration: enable exactly one of Camera-profile writes, "
+                "credential rotation, or firmware updates."
+            ),
         )
+    flag = EFFECT_MODE_FLAGS[expected_mode]
+    verb = "is" if expected_mode == "credential-rotation" else "are"
+    raise HTTPException(
+        status_code=403,
+        detail=f"{EFFECT_MODE_LABELS[expected_mode]} {verb} locked. Set {flag}=true only for the controlled live run.",
+    )
+
+
+def require_device_writes(confirm: bool) -> None:
+    require_effect_mode("camera-profile")
     if not confirm:
         raise HTTPException(status_code=400, detail="Explicit write confirmation is required.")
 
 
 def require_credential_rotation(confirm: bool) -> None:
-    if not env_flag("ENABLE_CREDENTIAL_ROTATION"):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Credential rotation is locked. Set ENABLE_CREDENTIAL_ROTATION=true only "
-                "in the disposable rotation runtime."
-            ),
-        )
-    if env_flag("ENABLE_DEVICE_WRITES"):
-        raise HTTPException(
-            status_code=409,
-            detail="Credential rotation and Camera-profile writes cannot be enabled together.",
-        )
+    require_effect_mode("credential-rotation")
     if not confirm:
         raise HTTPException(
             status_code=400, detail="Explicit credential-rotation confirmation is required."
@@ -484,15 +504,19 @@ async def push_update_for_device(
 
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
+    effect_modes = enabled_effect_modes()
     return {
-        "status": "ok",
+        "status": "ok" if len(effect_modes) <= 1 else "invalid-effect-configuration",
         "allowed_subnet": str(get_allowed_network()),
         "device_reads_configured": bool(
             os.getenv("MAGEWELL_USERNAME", "").strip() and os.getenv("MAGEWELL_PASSWORD", "")
         ),
         "device_writes_enabled": env_flag("ENABLE_DEVICE_WRITES"),
+        "firmware_updates_enabled": env_flag("ENABLE_FIRMWARE_UPDATES"),
         "credential_rotation_configured": bool(os.getenv("MAGEWELL_OLD_PASSWORD", "")),
         "credential_rotation_enabled": env_flag("ENABLE_CREDENTIAL_ROTATION"),
+        "effect_configuration_valid": len(effect_modes) <= 1,
+        "active_effect_mode": next(iter(effect_modes)) if len(effect_modes) == 1 else None,
     }
 
 
