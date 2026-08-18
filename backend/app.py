@@ -882,22 +882,30 @@ async def verify_target(
     connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
-            report = await get_device_report_with_login(
-                session, ip, username, password, timeout=10.0
-            )
+            actual = ""
+            verification_attempts = 0
+            for verification_attempts in range(1, 4):
+                report = await get_device_report_with_login(
+                    session, ip, username, password, timeout=10.0
+                )
+                actual = settings_fingerprint(report)
+                if actual == expected:
+                    break
+                if verification_attempts < 3:
+                    await asyncio.sleep(1)
     except Exception as exc:
         error = safe_device_error(exc)
         logger.error(
             "Verification read failed for %s (%s): %s", request.device.magewell_id, ip, error
         )
         raise HTTPException(status_code=502, detail=error) from None
-    actual = settings_fingerprint(report)
     return {
         "ip": ip,
         "magewell_id": request.device.magewell_id,
         "expected_settings_sha256": expected,
         "actual_settings_sha256": actual,
         "matches_expected_profile": actual == expected,
+        "verification_attempts": verification_attempts,
     }
 
 

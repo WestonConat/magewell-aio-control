@@ -490,4 +490,35 @@ def test_verify_target_returns_only_fingerprints(monkeypatch) -> None:
         "expected_settings_sha256": settings_fingerprint(expected),
         "actual_settings_sha256": settings_fingerprint(expected),
         "matches_expected_profile": True,
+        "verification_attempts": 1,
     }
+
+
+def test_verify_target_allows_bounded_read_only_settle(monkeypatch) -> None:
+    source = {"name": "SOURCE-01", "profile": {"mode": "camera"}}
+    target_before = {"name": "TARGET-01", "profile": {"mode": "old"}}
+    expected = {"name": "TARGET-01", "profile": {"mode": "camera"}}
+    reports = iter([target_before, expected])
+
+    async def settling_report(*args, **kwargs):
+        return next(reports)
+
+    async def no_wait(*args, **kwargs):
+        return None
+
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", settling_report)
+    monkeypatch.setattr(app_module.asyncio, "sleep", no_wait)
+    app.state.devices = [{"ip": "192.0.2.10", "name": "TARGET-01", "settings": target_before}]
+    app.state.control_device_ip = "192.0.2.20"
+    app.state.control_settings = source
+    app.state.control_settings_sha256 = settings_fingerprint(source)
+    response = client.post(
+        "/verify-target",
+        json={"device": {"ip": "192.0.2.10", "magewell_id": "TARGET-01"}},
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json()["matches_expected_profile"] is True
+    assert response.json()["verification_attempts"] == 2

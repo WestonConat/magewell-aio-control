@@ -111,7 +111,7 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Manual device scan | Sends read-only ping, login, and report requests inside `ALLOWED_SUBNET`. |
 | Select control source | Freezes a deep copy of the already-read live settings and returns its SHA-256; no device write. |
 | Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
-| Verify target | Reads the target report and compares its SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write. |
+| Verify target | Performs up to three read-only report checks over a two-second settle window and compares SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write or mutation retry. |
 | Credential inventory | Authenticates each responder with the new credential first, then the old credential; no device write. |
 | Rotate one credential | Uses the authenticated admin `set-passwd` API exactly once, then verifies device identity with the new credential. |
 | CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
