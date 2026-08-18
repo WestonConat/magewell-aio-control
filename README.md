@@ -95,10 +95,11 @@ writes also require the UI's `X-Magewell-Operator-Intent: confirmed` header, and
 requests from origins outside `ALLOWED_ORIGINS` are rejected before device network access.
 The header is an intent/CSRF guard, not a secret or a replacement for the write lock.
 
-Embedded-baseline and CSV writes are disabled. Every supported write must use an exact,
-deep-copied settings payload read from an operator-selected live control device. The
-backend returns a SHA-256 fingerprint when those settings are frozen and rejects the
-control source as a target.
+Embedded-baseline and CSV writes are disabled. Every supported write starts from a
+deep-copied settings payload read from an operator-selected live control device. Target-
+local identity, management-network, recording-path, and asset-inventory settings are
+preserved from each target's successful scan report. The backend rejects schema-mismatched
+targets, returns the frozen source SHA-256, and rejects the control source as a target.
 
 ## Read versus write behavior
 
@@ -106,9 +107,9 @@ control source as a target.
 | --- | --- |
 | `GET /healthz`, `GET /local-subnet` | Local state only; no LAN access. |
 | Manual device scan | Sends read-only ping, login, and report requests inside `ALLOWED_SUBNET`. |
-| Select control source | Freezes an exact deep copy of the already-read live settings and returns its SHA-256; no device write. |
+| Select control source | Freezes a deep copy of the already-read live settings and returns its SHA-256; no device write. |
 | Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
-| Verify target | Reads the target report and compares its settings SHA-256 with the frozen source; no device write. |
+| Verify target | Reads the target report and compares its SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write. |
 | CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
@@ -139,7 +140,8 @@ Complete this checklist during a supervised bench session:
 9. Review the displayed source-to-target mapping, submit once, and wait for that target's
    result. Do not proceed on an error or unknown response.
 10. Run the read-only target verification and confirm its settings SHA-256 matches the
-    frozen source. Verify the target directly in the Magewell UI as an independent check.
+    target-specific expected profile. Verify the target identity, network reachability,
+    and Camera profile directly in the Magewell UI as an independent check.
     Only then repeat with the next small, explicitly reviewed target set. Keep each batch
     within `MAX_UPDATE_DEVICES`; never raise the cap silently.
 11. At the end, set `ENABLE_DEVICE_WRITES=false`, run

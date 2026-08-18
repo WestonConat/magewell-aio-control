@@ -2,6 +2,7 @@ import asyncio
 import os
 
 import aiohttp
+import pytest
 from fastapi.testclient import TestClient
 
 from backend import app as app_module
@@ -103,17 +104,47 @@ def test_scan_host_cap_is_enforced(monkeypatch) -> None:
     assert "MAX_SCAN_HOSTS" in response.json()["detail"]
 
 
-def test_control_settings_are_an_exact_independent_live_source_copy() -> None:
-    source = {"rec-channels": [{"dir-name": "CONTROL"}], "enable-deinterlace": 1}
+def test_live_profile_preserves_target_local_settings() -> None:
+    source = {
+        "name": "CONTROL",
+        "wifi": [{"ssid": "control"}],
+        "rec-channels": [{"dir-name": "CONTROL"}],
+        "enable-deinterlace": 1,
+    }
+    target = {
+        "name": "TARGET-01",
+        "wifi": [{"ssid": "target"}],
+        "rec-channels": [{"dir-name": "TARGET-01"}],
+        "enable-deinterlace": 0,
+    }
     frozen = get_bulk_update_settings(
         "TARGET-01",
         source,
+        target,
     )
-    assert frozen == source
+    assert frozen == {
+        "name": "TARGET-01",
+        "wifi": [{"ssid": "target"}],
+        "rec-channels": [{"dir-name": "TARGET-01"}],
+        "enable-deinterlace": 1,
+    }
     assert frozen is not source
     assert frozen["rec-channels"] is not source["rec-channels"]
+    assert frozen["rec-channels"] is not target["rec-channels"]
     frozen["rec-channels"][0]["dir-name"] = "CHANGED"
     assert source["rec-channels"][0]["dir-name"] == "CONTROL"
+    assert target["rec-channels"][0]["dir-name"] == "TARGET-01"
+
+
+def test_live_profile_rejects_schema_or_identity_mismatch() -> None:
+    with pytest.raises(ValueError, match="identity"):
+        get_bulk_update_settings("TARGET-01", {"name": "CONTROL"}, {"name": "OTHER"})
+    with pytest.raises(ValueError, match="schemas differ"):
+        get_bulk_update_settings(
+            "TARGET-01",
+            {"name": "CONTROL", "profile": "camera"},
+            {"name": "TARGET-01"},
+        )
 
 
 def test_device_settings_are_not_returned_to_the_browser() -> None:
@@ -216,9 +247,13 @@ def test_concurrent_write_batch_is_rejected_before_second_mutation(monkeypatch) 
     monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
     monkeypatch.setattr(app_module, "push_update_for_device", slow_update)
     app.state.devices = [
-        {"ip": "192.0.2.10", "name": "ENCODER-01", "settings": {"profile": "camera"}}
+        {
+            "ip": "192.0.2.10",
+            "name": "ENCODER-01",
+            "settings": {"name": "ENCODER-01", "profile": "old"},
+        }
     ]
-    app.state.control_settings = {"enable-deinterlace": 1}
+    app.state.control_settings = {"name": "SOURCE-01", "profile": "camera"}
     app.state.control_device_ip = "192.0.2.20"
     app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
     request = PushUpdateRequest(
@@ -266,16 +301,19 @@ def test_control_source_cannot_be_a_write_target(monkeypatch) -> None:
 
 
 def test_verify_target_returns_only_fingerprints(monkeypatch) -> None:
-    source = {"profile": {"mode": "camera"}}
+    source = {"name": "SOURCE-01", "profile": {"mode": "camera"}}
+    target_before = {"name": "TARGET-01", "profile": {"mode": "old"}}
+    expected = {"name": "TARGET-01", "profile": {"mode": "camera"}}
 
     async def matching_report(*args, **kwargs):
-        return source
+        return expected
 
     monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
     monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
     monkeypatch.setattr(app_module, "get_device_report_with_login", matching_report)
-    app.state.devices = [{"ip": "192.0.2.10", "name": "TARGET-01", "settings": {"profile": "old"}}]
+    app.state.devices = [{"ip": "192.0.2.10", "name": "TARGET-01", "settings": target_before}]
     app.state.control_device_ip = "192.0.2.20"
+    app.state.control_settings = source
     app.state.control_settings_sha256 = settings_fingerprint(source)
     response = client.post(
         "/verify-target",
@@ -286,7 +324,7 @@ def test_verify_target_returns_only_fingerprints(monkeypatch) -> None:
     assert response.json() == {
         "ip": "192.0.2.10",
         "magewell_id": "TARGET-01",
-        "expected_settings_sha256": settings_fingerprint(source),
-        "actual_settings_sha256": settings_fingerprint(source),
-        "matches_frozen_source": True,
+        "expected_settings_sha256": settings_fingerprint(expected),
+        "actual_settings_sha256": settings_fingerprint(expected),
+        "matches_expected_profile": True,
     }

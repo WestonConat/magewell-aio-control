@@ -446,6 +446,7 @@ async def set_control(device: DeviceSelection) -> dict[str, Any]:
     frozen_settings = get_bulk_update_settings(
         device.magewell_id,
         control_settings,
+        control_settings,
     )
     fingerprint = settings_fingerprint(frozen_settings)
     app.state.control_settings = frozen_settings
@@ -503,25 +504,47 @@ async def push_updates(
     source_ip = getattr(app.state, "control_device_ip", None)
     if source_ip and any(device.ip == source_ip for device in request.devices):
         raise HTTPException(status_code=400, detail="The control source cannot be a write target.")
+    target_payloads: list[tuple[DeviceSelection, dict[str, Any], str]] = []
+    for device in request.devices:
+        try:
+            payload = get_bulk_update_settings(
+                device.magewell_id,
+                control_settings,
+                cached_devices[device.ip]["settings"],
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Write target {device.ip} is not profile-compatible: {exc}",
+            ) from None
+        target_payloads.append((device, payload, settings_fingerprint(payload)))
     lock = get_mutation_lock()
     if lock.locked():
         raise HTTPException(status_code=409, detail="Another device update is already running.")
     async with lock:
         connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
         async with aiohttp.ClientSession(connector=connector) as session:
-            results = await asyncio.gather(
+            mutation_results = await asyncio.gather(
                 *(
                     push_update_for_device(
                         session,
                         device.ip,
                         device.magewell_id,
-                        get_bulk_update_settings(device.magewell_id, control_settings),
+                        payload,
                         username,
                         password,
                     )
-                    for device in request.devices
+                    for device, payload, _ in target_payloads
                 )
             )
+    results = []
+    for mutation_result, (_, _, expected_fingerprint) in zip(mutation_results, target_payloads):
+        results.append(
+            {
+                **mutation_result,
+                "expected_settings_sha256": expected_fingerprint,
+            }
+        )
     return {
         "source_ip": source_ip,
         "source_settings_sha256": getattr(app.state, "control_settings_sha256", None),
@@ -548,9 +571,21 @@ async def verify_target(
         raise HTTPException(
             status_code=400, detail="The control source is not a verification target."
         )
-    expected = getattr(app.state, "control_settings_sha256", None)
-    if not expected:
+    control_settings = getattr(app.state, "control_settings", None)
+    if not control_settings:
         raise HTTPException(status_code=400, detail="Select and freeze a control source first.")
+    try:
+        expected_settings = get_bulk_update_settings(
+            request.device.magewell_id,
+            control_settings,
+            cached_device["settings"],
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Verification target is not profile-compatible: {exc}",
+        ) from None
+    expected = settings_fingerprint(expected_settings)
     connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -569,7 +604,7 @@ async def verify_target(
         "magewell_id": request.device.magewell_id,
         "expected_settings_sha256": expected,
         "actual_settings_sha256": actual,
-        "matches_frozen_source": actual == expected,
+        "matches_expected_profile": actual == expected,
     }
 
 
