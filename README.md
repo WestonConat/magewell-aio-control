@@ -166,8 +166,10 @@ Complete this checklist during a supervised bench session:
     first mismatch or read error and keeps the next write locked. Verify the target
     identity, network reachability, and Camera profile directly in the Magewell UI as an
     independent check.
-    Only then repeat with the next small, explicitly reviewed target set. Keep each batch
-    within `MAX_UPDATE_DEVICES`; never raise the cap silently.
+    Only then repeat with the next explicitly reviewed target set. Use **Select all
+    targets** for the confirmed remainder or select cards individually; the frozen source
+    is always excluded, and **Clear all** resets the batch. Keep each batch within
+    `MAX_UPDATE_DEVICES`; never raise the cap silently.
 11. At the end, set `ENABLE_DEVICE_WRITES=false`, run
     `docker compose up -d --force-recreate backend`, verify health reports writes locked,
     and run `docker compose down`.

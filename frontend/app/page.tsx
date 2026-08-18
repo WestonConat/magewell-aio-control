@@ -42,6 +42,11 @@ async function apiError(response: Response): Promise<string> {
   }
 }
 
+function shortHash(value?: string): string {
+  if (!value) return "Unavailable";
+  return `${value.slice(0, 8)}…${value.slice(-8)}`;
+}
+
 export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -64,6 +69,15 @@ export default function HomePage() {
   const [verificationInProgress, setVerificationInProgress] = useState(false);
   const [verificationRequired, setVerificationRequired] = useState(false);
   const [writesEnabled, setWritesEnabled] = useState(false);
+  const eligibleTargetIps = devices
+    .filter((device) => device.ip !== controlSource?.ip)
+    .map((device) => device.ip);
+  const allTargetsSelected =
+    eligibleTargetIps.length > 0 &&
+    eligibleTargetIps.every((ip) => selectedPushIps.includes(ip));
+  const selectedDevices = devices.filter((device) =>
+    selectedPushIps.includes(device.ip),
+  );
 
   useEffect(() => {
     const loadSafeStatus = async () => {
@@ -145,6 +159,28 @@ export default function HomePage() {
     );
   };
 
+  const handleSelectAll = () => {
+    if (verificationRequired) {
+      setPushMessage(
+        "Verify the just-written target selection before changing targets.",
+      );
+      return;
+    }
+    setSelectedPushIps(eligibleTargetIps);
+    setPushMessage("");
+  };
+
+  const handleClearAll = () => {
+    if (verificationRequired) {
+      setPushMessage(
+        "Verify the just-written target selection before changing targets.",
+      );
+      return;
+    }
+    setSelectedPushIps([]);
+    setPushMessage("");
+  };
+
   const handleConfirmControl = async () => {
     if (!selectedControlDevice) return;
     try {
@@ -166,7 +202,7 @@ export default function HomePage() {
         previous.filter((ip) => ip !== selectedControlDevice.ip),
       );
       setControlMessage(
-        `Frozen live source ${data.magewell_id} (${data.ip}); settings SHA-256 ${data.settings_sha256}.`,
+        `Source frozen: ${data.magewell_id} (${data.ip}) · Profile ${shortHash(data.settings_sha256)}`,
       );
     } catch (controlError) {
       setControlMessage(
@@ -193,7 +229,7 @@ export default function HomePage() {
       return;
     }
     const confirmed = window.confirm(
-      `Write frozen source ${controlSource.magewell_id} (${controlSource.ip}, SHA-256 ${controlSource.settings_sha256}) to exactly ${selectedPushIps.length} selected non-source device(s)? This changes device configuration.`,
+      `Write profile ${shortHash(controlSource.settings_sha256)} from ${controlSource.magewell_id} (${controlSource.ip}) to exactly ${selectedPushIps.length} selected non-source device(s)? This changes device configuration.`,
     );
     if (!confirmed) {
       setPushMessage("Update cancelled; no write request was sent.");
@@ -308,148 +344,257 @@ export default function HomePage() {
   };
 
   return (
-    <div className={styles.main}>
-      <div className={styles.formWrapper}>
-        <form onSubmit={handleSubmit}>
-          <label htmlFor="subnet" className={styles.label}>
-            Subnet to scan:
-          </label>
-          <input
-            id="subnet"
-            type="text"
-            value={subnet}
-            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              setSubnet(event.target.value)
-            }
-            className={styles.input}
-            placeholder="Enter an allowed CIDR"
-          />
-          <button type="submit" className={styles.button28} disabled={loading}>
-            {loading ? "Scanning..." : "Scan Network (read only)"}
+    <main className={styles.main}>
+      <section className={styles.hero}>
+        <div>
+          <p className={styles.eyebrow}>Bench control</p>
+          <h1>Encoder fleet</h1>
+          <p className={styles.heroCopy}>
+            Discover devices, choose one live source, then push and verify a
+            reviewed target set.
+          </p>
+        </div>
+        <span
+          className={`${styles.statusPill} ${
+            writesEnabled ? styles.statusArmed : styles.statusLocked
+          }`}
+        >
+          <span className={styles.statusDot} />
+          Writes {writesEnabled ? "enabled" : "locked"}
+        </span>
+      </section>
+
+      <section className={styles.scanPanel}>
+        <form onSubmit={handleSubmit} className={styles.scanForm}>
+          <div className={styles.fieldGroup}>
+            <label htmlFor="subnet" className={styles.label}>
+              Discovery subnet
+            </label>
+            <input
+              id="subnet"
+              type="text"
+              value={subnet}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setSubnet(event.target.value)
+              }
+              className={styles.input}
+              placeholder="Enter an allowed CIDR"
+            />
+          </div>
+          <button
+            type="submit"
+            className={styles.primaryButton}
+            disabled={loading}
+          >
+            {loading ? "Scanning…" : "Scan network"}
           </button>
         </form>
-      </div>
+        <div className={styles.scanMeta}>
+          <div>
+            <span>Mode</span>
+            <strong>Read only</strong>
+          </div>
+          <div>
+            <span>Inventory</span>
+            <strong>
+              {loading
+                ? "Scanning…"
+                : `${devices.length} encoder${devices.length === 1 ? "" : "s"}`}
+            </strong>
+          </div>
+        </div>
+        {controlMessage && <p className={styles.notice}>{controlMessage}</p>}
+        {error && <p className={styles.errorNotice}>{error}</p>}
+      </section>
 
-      <div className={styles.messageWrapper}>
-        <p className={styles.count}>
-          Device writes:{" "}
-          {writesEnabled ? "ENABLED — use controlled-run procedure" : "LOCKED"}
-        </p>
-        <p className={styles.count}>
-          Found {devices.length} device{devices.length === 1 ? "" : "s"}.
-        </p>
-        {controlMessage && (
-          <div className={styles.controlMessage}>{controlMessage}</div>
-        )}
-      </div>
+      {loading ? (
+        <section className={styles.loadingState}>
+          <WaterfallIcon />
+          <p>Reading the approved subnet…</p>
+        </section>
+      ) : devices.length > 0 ? (
+        <>
+          <section className={styles.workflowPanel}>
+            <div className={styles.sectionHeading}>
+              <div>
+                <p className={styles.eyebrow}>Current batch</p>
+                <h2>Source and targets</h2>
+              </div>
+              {verificationRequired && (
+                <span className={styles.verifyBadge}>
+                  Verification required
+                </span>
+              )}
+            </div>
 
-      <div className={styles.gridWrapper}>
-        {loading ? (
-          <>
-            <p className={styles.count}>Scanning...</p>
-            <WaterfallIcon />
-          </>
-        ) : devices.length > 0 ? (
-          <DeviceGrid
-            devices={devices}
-            selectedDeviceIps={selectedPushIps}
-            onSelectToggle={handleSelectToggle}
-            onSetControl={setSelectedControlDevice}
-          />
-        ) : (
-          <p className={styles.count}>
-            No scan results. Scans start only when you click the button.
-          </p>
-        )}
-      </div>
+            <div className={styles.workflowGrid}>
+              <div className={styles.summaryCard}>
+                <span className={styles.summaryLabel}>Live source</span>
+                <strong>
+                  {controlSource?.magewell_id || "Choose an encoder below"}
+                </strong>
+                <span className={styles.summaryMeta}>
+                  {controlSource
+                    ? `${controlSource.ip} · Profile ${shortHash(
+                        controlSource.settings_sha256,
+                      )}`
+                    : "Embedded baselines are disabled"}
+                </span>
+              </div>
+              <div className={styles.summaryCard}>
+                <span className={styles.summaryLabel}>Write targets</span>
+                <strong>
+                  {selectedPushIps.length} selected
+                  {eligibleTargetIps.length > 0
+                    ? ` of ${eligibleTargetIps.length}`
+                    : ""}
+                </strong>
+                <span className={styles.summaryMeta}>
+                  {selectedPushIps.length > 0
+                    ? selectedDevices
+                        .slice(0, 3)
+                        .map((device) => device.name)
+                        .join(", ") +
+                      (selectedDevices.length > 3
+                        ? ` +${selectedDevices.length - 3} more`
+                        : "")
+                    : "No target devices selected"}
+                </span>
+              </div>
+            </div>
 
-      {error && <p className={styles.count}>Error: {error}</p>}
+            <div className={styles.actionRow}>
+              <button
+                onClick={pushUpdates}
+                className={styles.primaryButton}
+                disabled={
+                  pushInProgress ||
+                  verificationInProgress ||
+                  verificationRequired ||
+                  !writesEnabled ||
+                  !controlSource ||
+                  selectedPushIps.length === 0
+                }
+              >
+                {pushInProgress
+                  ? "Writing…"
+                  : `Write to ${selectedPushIps.length || 0} target${
+                      selectedPushIps.length === 1 ? "" : "s"
+                    }`}
+              </button>
+              <button
+                onClick={verifySelectedTargets}
+                className={styles.secondaryButton}
+                disabled={
+                  pushInProgress ||
+                  verificationInProgress ||
+                  !controlSource ||
+                  selectedPushIps.length === 0
+                }
+              >
+                {verificationInProgress ? "Verifying…" : "Verify read-back"}
+              </button>
+            </div>
 
-      <div className={styles.pushContainer}>
-        <h2>Frozen live source</h2>
-        <p>
-          {controlSource
-            ? `${controlSource.magewell_id} — ${controlSource.ip} — ${controlSource.settings_sha256}`
-            : "None selected. The embedded baseline is disabled."}
-        </p>
-        <h2>Selected write targets: {selectedPushIps.length}</h2>
-        {selectedPushIps.length > 0 && (
-          <ul className={styles.selectedList}>
-            {selectedPushIps.map((ip) => {
-              const device = devices.find((candidate) => candidate.ip === ip);
-              return (
-                <li key={ip}>
-                  {device?.name || "Unnamed device"} — {ip}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-        <button
-          onClick={pushUpdates}
-          className={styles.button28}
-          disabled={
-            pushInProgress ||
-            verificationInProgress ||
-            verificationRequired ||
-            !writesEnabled ||
-            !controlSource ||
-            selectedPushIps.length === 0
-          }
-        >
-          {pushInProgress
-            ? "Updating..."
-            : "Write Settings to Selected Devices"}
-        </button>
-        <button
-          onClick={verifySelectedTargets}
-          className={styles.button28}
-          disabled={
-            pushInProgress ||
-            verificationInProgress ||
-            !controlSource ||
-            selectedPushIps.length === 0
-          }
-        >
-          {verificationInProgress
-            ? "Verifying..."
-            : "Verify Selected Targets (read only)"}
-        </button>
-        {pushMessage && <p className={styles.pushResult}>{pushMessage}</p>}
-        {pushResults.length > 0 && (
-          <ul className={styles.selectedList}>
-            {pushResults.map((result) => (
-              <li key={result.ip}>
-                {result.magewell_id} — {result.ip}: {result.status}
-                {result.error ? ` (${result.error})` : ""}
-              </li>
-            ))}
-          </ul>
-        )}
-        {verificationMessage && (
-          <p className={styles.pushResult}>{verificationMessage}</p>
-        )}
-        {verificationResults.length > 0 && (
-          <ul className={styles.selectedList}>
-            {verificationResults.map((result) => (
-              <li key={result.ip}>
-                {result.magewell_id} — {result.ip}:{" "}
-                {result.matches_expected_profile ? "VERIFIED" : "STOP"}
-                {result.verification_attempts
-                  ? ` after ${result.verification_attempts} read${result.verification_attempts === 1 ? "" : "s"}`
-                  : ""}
-                {result.error ? ` (${result.error})` : ""}
-                {result.expected_settings_sha256
-                  ? ` — expected ${result.expected_settings_sha256}`
-                  : ""}
-                {result.actual_settings_sha256
-                  ? ` — actual ${result.actual_settings_sha256}`
-                  : ""}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+            {(pushMessage || verificationMessage) && (
+              <div className={styles.resultMessages}>
+                {pushMessage && <p>{pushMessage}</p>}
+                {verificationMessage && <p>{verificationMessage}</p>}
+              </div>
+            )}
+            {(pushResults.length > 0 || verificationResults.length > 0) && (
+              <div className={styles.resultsList}>
+                {pushResults.map((result) => (
+                  <div className={styles.resultRow} key={`push-${result.ip}`}>
+                    <span>
+                      <strong>{result.magewell_id}</strong>
+                      <small>{result.ip}</small>
+                    </span>
+                    <span className={styles.resultStatus}>{result.status}</span>
+                    {result.error && <small>{result.error}</small>}
+                  </div>
+                ))}
+                {verificationResults.map((result) => (
+                  <div className={styles.resultRow} key={`verify-${result.ip}`}>
+                    <span>
+                      <strong>{result.magewell_id}</strong>
+                      <small>{result.ip}</small>
+                    </span>
+                    <span
+                      className={
+                        result.matches_expected_profile
+                          ? styles.resultVerified
+                          : styles.resultStopped
+                      }
+                    >
+                      {result.matches_expected_profile ? "Verified" : "Stop"}
+                    </span>
+                    <small>
+                      {result.error
+                        ? result.error
+                        : result.matches_expected_profile
+                          ? `Profile ${shortHash(result.actual_settings_sha256)} · ${
+                              result.verification_attempts || 1
+                            } read${
+                              result.verification_attempts === 1 ? "" : "s"
+                            }`
+                          : `Expected ${shortHash(
+                              result.expected_settings_sha256,
+                            )} · got ${shortHash(
+                              result.actual_settings_sha256,
+                            )}`}
+                    </small>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className={styles.encodersSection}>
+            <div className={styles.sectionHeading}>
+              <div>
+                <p className={styles.eyebrow}>Inventory</p>
+                <h2>{devices.length} encoders</h2>
+              </div>
+              <div className={styles.bulkActions}>
+                <button
+                  className={styles.textButton}
+                  onClick={handleSelectAll}
+                  disabled={
+                    verificationRequired ||
+                    eligibleTargetIps.length === 0 ||
+                    allTargetsSelected
+                  }
+                >
+                  Select all targets
+                </button>
+                <button
+                  className={styles.textButton}
+                  onClick={handleClearAll}
+                  disabled={
+                    verificationRequired || selectedPushIps.length === 0
+                  }
+                >
+                  Clear all
+                </button>
+              </div>
+            </div>
+            <DeviceGrid
+              devices={devices}
+              selectedDeviceIps={selectedPushIps}
+              controlSourceIp={controlSource?.ip}
+              onSelectToggle={handleSelectToggle}
+              onSetControl={setSelectedControlDevice}
+            />
+          </section>
+        </>
+      ) : (
+        <section className={styles.emptyState}>
+          <p className={styles.eyebrow}>No inventory yet</p>
+          <h2>Start with a read-only scan</h2>
+          <p>The app never scans until you click the button.</p>
+        </section>
+      )}
 
       {selectedControlDevice && (
         <div
@@ -469,13 +614,13 @@ export default function HomePage() {
             <div className={styles.modalButtons}>
               <button
                 onClick={() => setSelectedControlDevice(null)}
-                className={styles.button28}
+                className={styles.secondaryButton}
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmControl}
-                className={styles.button28}
+                className={styles.primaryButton}
               >
                 Confirm Source
               </button>
@@ -483,6 +628,6 @@ export default function HomePage() {
           </div>
         </div>
       )}
-    </div>
+    </main>
   );
 }

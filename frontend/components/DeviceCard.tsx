@@ -1,7 +1,7 @@
-'use client';
+"use client";
 
-import React from 'react';
-import styles from '@/styles/DeviceCard.module.css';
+import React from "react";
+import styles from "@/styles/DeviceCard.module.css";
 
 export interface Device {
   ip: string;
@@ -11,35 +11,52 @@ export interface Device {
 interface DeviceCardProps {
   device: Device;
   isSelected: boolean;
+  isControlSource: boolean;
   onSelectToggle: (device: Device) => void;
   onSetControl: (device: Device) => void;
 }
 
-const DeviceCard: React.FC<DeviceCardProps> = ({ device, isSelected, onSelectToggle, onSetControl }) => {
+const DeviceCard: React.FC<DeviceCardProps> = ({
+  device,
+  isSelected,
+  isControlSource,
+  onSelectToggle,
+  onSetControl,
+}) => {
   return (
-    <div className={styles.card}>
+    <div
+      className={`${styles.card} ${isSelected ? styles.selected : ""} ${
+        isControlSource ? styles.controlSource : ""
+      }`}
+    >
       <div className={styles.cardContent}>
-        <h2 className={styles.cardName}>{device.name || "Unnamed Device"}</h2>
+        <div className={styles.cardTitleRow}>
+          <h3 className={styles.cardName}>{device.name || "Unnamed Device"}</h3>
+          {isControlSource && (
+            <span className={styles.sourceBadge}>Source</span>
+          )}
+        </div>
         <p className={styles.cardIp}>{device.ip}</p>
       </div>
       <div className={styles.cardFooter}>
-        <div className={styles.checkboxContainer}>
-          <input 
-            type="checkbox" 
-            checked={isSelected} 
-            onChange={() => onSelectToggle(device)} 
+        <label className={styles.checkboxContainer}>
+          <input
+            type="checkbox"
+            checked={isSelected}
+            disabled={isControlSource}
+            onChange={() => onSelectToggle(device)}
             className={styles.checkbox}
-            id={`select-${device.ip}`}
           />
-          <label htmlFor={`select-${device.ip}`} className={styles.checkboxLabel}>
-            Update
-          </label>
-        </div>
-        <button 
-          className={styles.controlButton} 
+          <span className={styles.checkboxLabel}>
+            {isSelected ? "Selected" : "Target"}
+          </span>
+        </label>
+        <button
+          className={styles.controlButton}
           onClick={() => onSetControl(device)}
+          disabled={isControlSource}
         >
-          Set Control
+          {isControlSource ? "Current source" : "Use as source"}
         </button>
       </div>
     </div>
@@ -47,4 +64,3 @@ const DeviceCard: React.FC<DeviceCardProps> = ({ device, isSelected, onSelectTog
 };
 
 export default DeviceCard;
-
