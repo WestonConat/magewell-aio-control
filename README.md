@@ -80,7 +80,9 @@ NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000 npm --prefix frontend run dev
 | `ALLOWED_SUBNET` | `127.0.0.1/32` | IPv4 CIDR. Every requested scan and write target must be inside it. |
 | `MAGEWELL_USERNAME` | empty | Required before any real device report read or write. |
 | `MAGEWELL_PASSWORD` | empty | Required before any real device report read or write; never commit it. |
-| `ENABLE_DEVICE_WRITES` | `false` | The single real-device effect boundary. Only `true` unlocks write endpoints. |
+| `MAGEWELL_OLD_PASSWORD` | empty | Temporary rotation input; inject only into the disposable backend process and never store it. |
+| `ENABLE_CREDENTIAL_ROTATION` | `false` | Separate lock for one-device-at-a-time password rotation; cannot be enabled with Camera-profile writes. |
+| `ENABLE_DEVICE_WRITES` | `false` | Camera-profile write boundary. Never enable it together with credential rotation. |
 | `MAX_SCAN_HOSTS` | `1024` | Maximum hosts in one requested scan; hard ceiling is 4096. |
 | `MAX_UPDATE_DEVICES` | `100` | Maximum unique targets in one write request; hard ceiling is 500. |
 | `ALLOWED_ORIGINS` | local UI origins | Comma-separated exact browser origins allowed by CORS. |
@@ -110,6 +112,8 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Select control source | Freezes a deep copy of the already-read live settings and returns its SHA-256; no device write. |
 | Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
 | Verify target | Reads the target report and compares its SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write. |
+| Credential inventory | Authenticates each responder with the new credential first, then the old credential; no device write. |
+| Rotate one credential | Uses the authenticated admin `set-passwd` API exactly once, then verifies device identity with the new credential. |
 | CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
@@ -117,6 +121,22 @@ credentials, an explicit UI confirmation, and a validated non-empty target set. 
 write batch can run at a time. The mutation call is intentionally not retried, preventing
 an ambiguous response from causing a silent second submission. The UI reports success or
 failure for every target.
+
+Credential rotation has a separate `ENABLE_CREDENTIAL_ROTATION` lock and accepts exactly
+one target per request. A fresh mixed-credential inventory classifies devices as `old`,
+`new`, or `error`. An already-rotated device is verified without another mutation. An
+ambiguous password-change response blocks any retry until a fresh inventory determines
+which credential works. Camera-profile writes must remain locked throughout rotation.
+
+For a supervised rotation, put the desired final password in `MAGEWELL_PASSWORD`, inject
+the old password only as the disposable process environment variable
+`MAGEWELL_OLD_PASSWORD`, set `ENABLE_CREDENTIAL_ROTATION=true`, and keep
+`ENABLE_DEVICE_WRITES=false`. Run `GET /credential-rotation-inventory` for the exact
+approved subnet and require every responder to report `old` or `new`. Submit one explicit
+`POST /rotate-credential` target with `confirm: true`; proceed only after
+`rotated-and-verified`. Rotate subsequent `old` devices one at a time. Finish with a fresh
+inventory in which every device reports `new`, then remove the container. Never retry a
+device whose credential state is unknown without first running a fresh inventory.
 
 ## Controlled live-run checklist
 

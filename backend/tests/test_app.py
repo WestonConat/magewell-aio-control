@@ -35,6 +35,8 @@ def test_health_reports_safe_write_boundary() -> None:
         "allowed_subnet": "192.0.2.0/24",
         "device_reads_configured": False,
         "device_writes_enabled": False,
+        "credential_rotation_configured": False,
+        "credential_rotation_enabled": False,
     }
 
 
@@ -90,6 +92,40 @@ def test_embedded_baseline_endpoint_is_disabled(monkeypatch) -> None:
     )
     assert response.status_code == 409
     assert "Embedded baseline writes are disabled" in response.json()["detail"]
+
+
+def test_credential_rotation_is_locked_before_network_access(monkeypatch) -> None:
+    monkeypatch.setenv("MAGEWELL_USERNAME", "Admin")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "new-password")
+    monkeypatch.setenv("MAGEWELL_OLD_PASSWORD", "old-password")
+    response = client.post(
+        "/rotate-credential",
+        json={
+            "confirm": True,
+            "device": {"ip": "192.0.2.10", "magewell_id": "ENCODER-01"},
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 403
+    assert "Credential rotation is locked" in response.json()["detail"]
+
+
+def test_credential_rotation_requires_profile_writes_to_be_locked(monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_CREDENTIAL_ROTATION", "true")
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "Admin")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "new-password")
+    monkeypatch.setenv("MAGEWELL_OLD_PASSWORD", "old-password")
+    response = client.post(
+        "/rotate-credential",
+        json={
+            "confirm": True,
+            "device": {"ip": "192.0.2.10", "magewell_id": "ENCODER-01"},
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 409
+    assert "cannot be enabled together" in response.json()["detail"]
 
 
 def test_scan_host_cap_is_enforced(monkeypatch) -> None:
@@ -228,6 +264,133 @@ def test_ambiguous_device_error_does_not_retry_import(monkeypatch) -> None:
     result = asyncio.run(run_failure())
     assert result["status"] == "failed"
     assert mutation_calls == 1
+
+
+def test_credential_rotation_is_single_device_and_verified(monkeypatch) -> None:
+    mutation_calls = 0
+
+    async def report(*args, **kwargs):
+        return {"name": "ENCODER-01"}
+
+    async def login(*args, **kwargs):
+        return "session-cookie"
+
+    async def users(*args, **kwargs):
+        return [{"id": "Admin", "type": 1}]
+
+    async def rotate(*args, **kwargs):
+        nonlocal mutation_calls
+        mutation_calls += 1
+
+    monkeypatch.setenv("ENABLE_CREDENTIAL_ROTATION", "true")
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "false")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "Admin")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "new-password")
+    monkeypatch.setenv("MAGEWELL_OLD_PASSWORD", "old-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "login_device", login)
+    monkeypatch.setattr(app_module, "get_users_call", users)
+    monkeypatch.setattr(app_module, "set_password_call", rotate)
+    app.state.rotation_devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "ENCODER-01",
+            "credential_state": "old",
+        }
+    ]
+    app.state.rotation_unknown_ips = set()
+    response = client.post(
+        "/rotate-credential",
+        json={
+            "confirm": True,
+            "device": {"ip": "192.0.2.10", "magewell_id": "ENCODER-01"},
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "rotated-and-verified"
+    assert mutation_calls == 1
+    assert app.state.rotation_devices[0]["credential_state"] == "new"
+
+
+def test_ambiguous_credential_rotation_requires_fresh_inventory(monkeypatch) -> None:
+    mutation_calls = 0
+
+    async def report(*args, **kwargs):
+        return {"name": "ENCODER-01"}
+
+    async def login(*args, **kwargs):
+        return "session-cookie"
+
+    async def users(*args, **kwargs):
+        return [{"id": "Admin", "type": 1}]
+
+    async def ambiguous_rotation(*args, **kwargs):
+        nonlocal mutation_calls
+        mutation_calls += 1
+        raise aiohttp.ServerDisconnectedError("ambiguous response")
+
+    monkeypatch.setenv("ENABLE_CREDENTIAL_ROTATION", "true")
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "false")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "Admin")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "new-password")
+    monkeypatch.setenv("MAGEWELL_OLD_PASSWORD", "old-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "login_device", login)
+    monkeypatch.setattr(app_module, "get_users_call", users)
+    monkeypatch.setattr(app_module, "set_password_call", ambiguous_rotation)
+    app.state.rotation_devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "ENCODER-01",
+            "credential_state": "old",
+        }
+    ]
+    app.state.rotation_unknown_ips = set()
+    request = {
+        "confirm": True,
+        "device": {"ip": "192.0.2.10", "magewell_id": "ENCODER-01"},
+    }
+    first_response = client.post("/rotate-credential", json=request, headers=OPERATOR_HEADERS)
+    second_response = client.post("/rotate-credential", json=request, headers=OPERATOR_HEADERS)
+    assert first_response.status_code == 502
+    assert second_response.status_code == 409
+    assert "fresh credential inventory" in second_response.json()["detail"]
+    assert mutation_calls == 1
+
+
+def test_already_rotated_device_is_verified_without_mutation(monkeypatch) -> None:
+    async def report(*args, **kwargs):
+        return {"name": "ENCODER-01"}
+
+    async def forbidden_mutation(*args, **kwargs):
+        raise AssertionError("already-rotated device must not be mutated")
+
+    monkeypatch.setenv("ENABLE_CREDENTIAL_ROTATION", "true")
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "false")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "Admin")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "new-password")
+    monkeypatch.setenv("MAGEWELL_OLD_PASSWORD", "old-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "set_password_call", forbidden_mutation)
+    app.state.rotation_devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "ENCODER-01",
+            "credential_state": "new",
+        }
+    ]
+    app.state.rotation_unknown_ips = set()
+    response = client.post(
+        "/rotate-credential",
+        json={
+            "confirm": True,
+            "device": {"ip": "192.0.2.10", "magewell_id": "ENCODER-01"},
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "already-rotated"
 
 
 def test_concurrent_write_batch_is_rejected_before_second_mutation(monkeypatch) -> None:
