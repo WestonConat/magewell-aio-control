@@ -95,16 +95,10 @@ writes also require the UI's `X-Magewell-Operator-Intent: confirmed` header, and
 requests from origins outside `ALLOWED_ORIGINS` are rejected before device network access.
 The header is an intent/CSRF guard, not a secret or a replacement for the write lock.
 
-CSV baseline updates accept UTF-8 `.csv` files with exactly these required columns:
-
-```csv
-Magewell ID,Magewell IP
-ENCODER-01,192.0.2.10
-```
-
-See `backend/devices.example.csv`. IPs must be unique and inside `ALLOWED_SUBNET`;
-blank IDs, malformed files, duplicate IPs, and excessive row counts are rejected before
-network access.
+Embedded-baseline and CSV writes are disabled. Every supported write must use an exact,
+deep-copied settings payload read from an operator-selected live control device. The
+backend returns a SHA-256 fingerprint when those settings are frozen and rejects the
+control source as a target.
 
 ## Read versus write behavior
 
@@ -112,9 +106,10 @@ network access.
 | --- | --- |
 | `GET /healthz`, `GET /local-subnet` | Local state only; no LAN access. |
 | Manual device scan | Sends read-only ping, login, and report requests inside `ALLOWED_SUBNET`. |
-| Select control source | Stores the already-read settings in backend memory; no device write. |
-| Push selected settings | Calls Magewell `import-settings` once per explicitly selected, scanned target. |
-| CSV baseline update | Calls `import-settings` once per validated CSV row using the embedded baseline. |
+| Select control source | Freezes an exact deep copy of the already-read live settings and returns its SHA-256; no device write. |
+| Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
+| Verify target | Reads the target report and compares its settings SHA-256 with the frozen source; no device write. |
+| CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
 credentials, an explicit UI confirmation, and a validated non-empty target set. Only one
@@ -124,27 +119,29 @@ failure for every target.
 
 ## Controlled live-run checklist
 
-Complete this checklist during the maintenance window:
+Complete this checklist during a supervised bench session:
 
 1. Rotate the previously exposed device credentials and put the new values only in
    the untracked `.env`.
 2. Confirm Docker Desktop is running and the workstation is attached only to the intended
    control network.
-3. Set the smallest correct `ALLOWED_SUBNET`; verify the intended device IPs and CSV rows
-   are inside it.
+3. Set the exact approved `ALLOWED_SUBNET`; do not widen or substitute discovery targets.
 4. Keep `ENABLE_DEVICE_WRITES=false`; run `just check`,
    `docker compose config --quiet`, and `docker compose up --build -d`.
 5. Check `curl --fail --silent http://127.0.0.1:8000/healthz`. Confirm the subnet,
    `device_reads_configured: true`, and `device_writes_enabled: false`.
-6. Open the UI and manually scan. Reconcile the discovered names/IPs against the run sheet.
-   Stop if any unexpected device or read error appears.
+6. Open the UI and manually scan. Treat the successful live discovery as the inventory;
+   stop on any identity mismatch, authentication problem, or read error.
 7. Stop the stack, set `ENABLE_DEVICE_WRITES=true`, and recreate it with
    `docker compose up --build -d --force-recreate`. Verify health now reports writes enabled.
-8. Rescan, select the known-good control source, and select exactly one staged test target.
-9. Review the confirmation count, submit once, and wait for that target's result. Do not
-   proceed on an error or unknown response.
-10. Verify the staged target directly in the Magewell UI. Only then repeat with the next
-    small, explicitly reviewed target set.
+8. Rescan, explicitly select the known-good live control source, record its settings
+   SHA-256, and select exactly one staged non-source target.
+9. Review the displayed source-to-target mapping, submit once, and wait for that target's
+   result. Do not proceed on an error or unknown response.
+10. Run the read-only target verification and confirm its settings SHA-256 matches the
+    frozen source. Verify the target directly in the Magewell UI as an independent check.
+    Only then repeat with the next small, explicitly reviewed target set. Keep each batch
+    within `MAX_UPDATE_DEVICES`; never raise the cap silently.
 11. At the end, set `ENABLE_DEVICE_WRITES=false`, run
     `docker compose up -d --force-recreate backend`, verify health reports writes locked,
     and run `docker compose down`.

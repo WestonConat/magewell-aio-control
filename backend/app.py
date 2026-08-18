@@ -1,7 +1,5 @@
 import asyncio
-import csv
 import hashlib
-import io
 import ipaddress
 import json
 import logging
@@ -11,12 +9,11 @@ from typing import Any
 
 import aiohttp
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
-from .magewell_settings import get_modified_settings
 from .settings_merge import get_bulk_update_settings
 
 logging.basicConfig(
@@ -39,6 +36,10 @@ class DeviceSelection(BaseModel):
 class PushUpdateRequest(BaseModel):
     devices: list[DeviceSelection] = Field(min_length=1)
     confirm: bool = False
+
+
+class VerifyTargetRequest(BaseModel):
+    device: DeviceSelection
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -77,6 +78,11 @@ def safe_device_error(exc: BaseException) -> str:
     if isinstance(exc, aiohttp.ClientError | TimeoutError):
         return "Device request failed; verify reachability, credentials, and device response."
     return str(exc)
+
+
+def settings_fingerprint(settings: dict[str, Any]) -> str:
+    canonical = json.dumps(settings, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def get_max_scan_hosts() -> int:
@@ -352,33 +358,6 @@ async def push_update_for_device(
         }
 
 
-async def run_bulk_update(
-    devices: list[DeviceSelection],
-    username: str,
-    password: str,
-) -> list[dict[str, str]]:
-    semaphore = asyncio.Semaphore(10)
-
-    async def limited_update(
-        device: DeviceSelection,
-        session: aiohttp.ClientSession,
-    ) -> dict[str, str]:
-        async with semaphore:
-            settings = get_modified_settings(device.magewell_id)
-            return await push_update_for_device(
-                session,
-                device.ip,
-                device.magewell_id,
-                settings,
-                username,
-                password,
-            )
-
-    connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        return await asyncio.gather(*(limited_update(device, session) for device in devices))
-
-
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {
@@ -412,6 +391,9 @@ async def discover_magewell(
     if not rescan and getattr(app.state, "devices", None):
         return {"devices": public_device_list(app.state.devices), "cached": True}
 
+    app.state.control_settings = None
+    app.state.control_device_ip = None
+    app.state.control_settings_sha256 = None
     ips = [str(ip) for ip in network.hosts()]
     connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
     semaphore = asyncio.Semaphore(max_concurrent)
@@ -458,12 +440,23 @@ async def set_control(device: DeviceSelection) -> dict[str, Any]:
         raise HTTPException(
             status_code=400, detail="Control device settings were not read successfully."
         )
-    app.state.control_settings = get_bulk_update_settings(
+    scanned_name = control_device.get("name", "")
+    if not scanned_name or device.magewell_id != scanned_name:
+        raise HTTPException(status_code=400, detail="Control device identity mismatch.")
+    frozen_settings = get_bulk_update_settings(
         device.magewell_id,
         control_settings,
     )
+    fingerprint = settings_fingerprint(frozen_settings)
+    app.state.control_settings = frozen_settings
     app.state.control_device_ip = ip
-    return {"message": "Control device selected.", "ip": ip, "magewell_id": device.magewell_id}
+    app.state.control_settings_sha256 = fingerprint
+    return {
+        "message": "Live control settings frozen.",
+        "ip": ip,
+        "magewell_id": device.magewell_id,
+        "settings_sha256": fingerprint,
+    }
 
 
 @app.post("/push-updates")
@@ -481,13 +474,35 @@ async def push_updates(
         raise HTTPException(
             status_code=400, detail="Select a control device before pushing settings."
         )
-    cached_ips = {item["ip"] for item in getattr(app.state, "devices", [])}
-    unknown_ips = [device.ip for device in request.devices if device.ip not in cached_ips]
-    if unknown_ips:
+    cached_devices = {item["ip"]: item for item in getattr(app.state, "devices", [])}
+    invalid_targets = [
+        device.ip
+        for device in request.devices
+        if device.ip not in cached_devices
+        or cached_devices[device.ip].get("read_error")
+        or not cached_devices[device.ip].get("settings")
+    ]
+    if invalid_targets:
         raise HTTPException(
             status_code=400,
-            detail=f"Every write target must be in the latest scan; unknown: {', '.join(unknown_ips)}",
+            detail=(
+                "Every write target must have a successful latest-scan report; invalid: "
+                f"{', '.join(invalid_targets)}"
+            ),
         )
+    identity_mismatches = [
+        device.ip
+        for device in request.devices
+        if device.magewell_id != cached_devices[device.ip].get("name")
+    ]
+    if identity_mismatches:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Write target identity mismatch: {', '.join(identity_mismatches)}",
+        )
+    source_ip = getattr(app.state, "control_device_ip", None)
+    if source_ip and any(device.ip == source_ip for device in request.devices):
+        raise HTTPException(status_code=400, detail="The control source cannot be a write target.")
     lock = get_mutation_lock()
     if lock.locked():
         raise HTTPException(status_code=409, detail="Another device update is already running.")
@@ -507,48 +522,69 @@ async def push_updates(
                     for device in request.devices
                 )
             )
-    return {"results": results}
+    return {
+        "source_ip": source_ip,
+        "source_settings_sha256": getattr(app.state, "control_settings_sha256", None),
+        "results": results,
+    }
+
+
+@app.post("/verify-target")
+async def verify_target(
+    request: VerifyTargetRequest,
+    x_magewell_operator_intent: str | None = Header(None),
+    origin: str | None = Header(None),
+) -> dict[str, Any]:
+    require_operator_intent(x_magewell_operator_intent, origin)
+    username, password = get_device_credentials()
+    ip = validate_device_ip(request.device.ip)
+    cached_device = next(
+        (item for item in getattr(app.state, "devices", []) if item["ip"] == ip),
+        None,
+    )
+    if not cached_device or request.device.magewell_id != cached_device.get("name"):
+        raise HTTPException(status_code=400, detail="Verification target identity mismatch.")
+    if ip == getattr(app.state, "control_device_ip", None):
+        raise HTTPException(
+            status_code=400, detail="The control source is not a verification target."
+        )
+    expected = getattr(app.state, "control_settings_sha256", None)
+    if not expected:
+        raise HTTPException(status_code=400, detail="Select and freeze a control source first.")
+    connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            report = await get_device_report_with_login(
+                session, ip, username, password, timeout=10.0
+            )
+    except Exception as exc:
+        error = safe_device_error(exc)
+        logger.error(
+            "Verification read failed for %s (%s): %s", request.device.magewell_id, ip, error
+        )
+        raise HTTPException(status_code=502, detail=error) from None
+    actual = settings_fingerprint(report)
+    return {
+        "ip": ip,
+        "magewell_id": request.device.magewell_id,
+        "expected_settings_sha256": expected,
+        "actual_settings_sha256": actual,
+        "matches_frozen_source": actual == expected,
+    }
 
 
 @app.post("/bulk-update")
 async def bulk_update(
-    file: UploadFile = File(...),
     confirm: bool = Query(False),
     x_magewell_operator_intent: str | None = Header(None),
     origin: str | None = Header(None),
 ) -> dict[str, Any]:
     require_operator_intent(x_magewell_operator_intent, origin)
     require_device_writes(confirm)
-    username, password = get_device_credentials()
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Upload a .csv file.")
-    try:
-        content = (await file.read()).decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded.") from exc
-    reader = csv.DictReader(io.StringIO(content))
-    required_fields = {"Magewell ID", "Magewell IP"}
-    if not reader.fieldnames or not required_fields.issubset(reader.fieldnames):
-        raise HTTPException(
-            status_code=400,
-            detail='CSV must include "Magewell ID" and "Magewell IP" columns.',
-        )
-    devices = []
-    for row_number, row in enumerate(reader, start=2):
-        magewell_id = (row.get("Magewell ID") or "").strip()
-        magewell_ip = (row.get("Magewell IP") or "").strip()
-        if not magewell_id or not magewell_ip:
-            raise HTTPException(
-                status_code=400,
-                detail=f"CSV row {row_number} must include both Magewell ID and Magewell IP.",
-            )
-        devices.append(DeviceSelection(magewell_id=magewell_id, ip=magewell_ip))
-    if not devices:
-        raise HTTPException(status_code=400, detail="CSV contains no device rows.")
-    ensure_unique_devices(devices)
-    lock = get_mutation_lock()
-    if lock.locked():
-        raise HTTPException(status_code=409, detail="Another device update is already running.")
-    async with lock:
-        results = await run_bulk_update(devices, username, password)
-    return {"results": results}
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Embedded baseline writes are disabled. Discover devices and select a live "
+            "control source instead."
+        ),
+    )

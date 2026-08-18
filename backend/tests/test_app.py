@@ -13,6 +13,7 @@ from backend.app import (
     push_update_for_device,
     push_updates,
     safe_device_error,
+    settings_fingerprint,
     validate_scan_network,
 )
 from backend.settings_merge import get_bulk_update_settings
@@ -79,18 +80,15 @@ def test_write_endpoint_requires_request_confirmation(monkeypatch) -> None:
     assert response.json()["detail"] == "Explicit write confirmation is required."
 
 
-def test_csv_rejects_blank_identity_before_network_access(monkeypatch) -> None:
+def test_embedded_baseline_endpoint_is_disabled(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
-    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
-    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
     response = client.post(
         "/bulk-update",
         params={"confirm": "true"},
-        files={"file": ("devices.csv", "Magewell ID,Magewell IP\n,192.0.2.10\n", "text/csv")},
         headers=OPERATOR_HEADERS,
     )
-    assert response.status_code == 400
-    assert "CSV row 2" in response.json()["detail"]
+    assert response.status_code == 409
+    assert "Embedded baseline writes are disabled" in response.json()["detail"]
 
 
 def test_scan_host_cap_is_enforced(monkeypatch) -> None:
@@ -105,13 +103,17 @@ def test_scan_host_cap_is_enforced(monkeypatch) -> None:
     assert "MAX_SCAN_HOSTS" in response.json()["detail"]
 
 
-def test_control_merge_preserves_target_recording_names() -> None:
-    merged = get_bulk_update_settings(
+def test_control_settings_are_an_exact_independent_live_source_copy() -> None:
+    source = {"rec-channels": [{"dir-name": "CONTROL"}], "enable-deinterlace": 1}
+    frozen = get_bulk_update_settings(
         "TARGET-01",
-        {"rec-channels": [{"dir-name": "CONTROL"}], "enable-deinterlace": 1},
+        source,
     )
-    assert merged["enable-deinterlace"] == 1
-    assert merged["rec-channels"][0]["dir-name"] == "TARGET-01_REC_Folder"
+    assert frozen == source
+    assert frozen is not source
+    assert frozen["rec-channels"] is not source["rec-channels"]
+    frozen["rec-channels"][0]["dir-name"] = "CHANGED"
+    assert source["rec-channels"][0]["dir-name"] == "CONTROL"
 
 
 def test_device_settings_are_not_returned_to_the_browser() -> None:
@@ -131,26 +133,11 @@ def test_loopback_default_is_a_valid_single_host(monkeypatch) -> None:
     assert str(validate_scan_network("127.0.0.1/32")) == "127.0.0.1/32"
 
 
-def test_cross_origin_csv_write_is_rejected_before_network_access(monkeypatch) -> None:
-    called = False
-
-    async def unexpected_update(*args, **kwargs):
-        nonlocal called
-        called = True
-        return []
-
+def test_cross_origin_baseline_request_is_rejected_before_route_logic(monkeypatch) -> None:
     monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
-    monkeypatch.setattr(app_module, "run_bulk_update", unexpected_update)
     response = client.post(
         "/bulk-update",
         params={"confirm": "true"},
-        files={
-            "file": (
-                "devices.csv",
-                "Magewell ID,Magewell IP\nENCODER-01,192.0.2.10\n",
-                "text/csv",
-            )
-        },
         headers={
             "Origin": "https://untrusted.example",
             "X-Magewell-Operator-Intent": OPERATOR_INTENT_VALUE,
@@ -158,7 +145,6 @@ def test_cross_origin_csv_write_is_rejected_before_network_access(monkeypatch) -
     )
     assert response.status_code == 403
     assert response.json()["detail"] == "Browser origin is not allowed."
-    assert called is False
 
 
 def test_device_network_errors_do_not_expose_credential_urls(monkeypatch, caplog) -> None:
@@ -229,8 +215,12 @@ def test_concurrent_write_batch_is_rejected_before_second_mutation(monkeypatch) 
     monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
     monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
     monkeypatch.setattr(app_module, "push_update_for_device", slow_update)
-    app.state.devices = [{"ip": "192.0.2.10", "name": "ENCODER-01", "settings": {}}]
+    app.state.devices = [
+        {"ip": "192.0.2.10", "name": "ENCODER-01", "settings": {"profile": "camera"}}
+    ]
     app.state.control_settings = {"enable-deinterlace": 1}
+    app.state.control_device_ip = "192.0.2.20"
+    app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
     request = PushUpdateRequest(
         confirm=True,
         devices=[{"ip": "192.0.2.10", "magewell_id": "ENCODER-01"}],
@@ -251,3 +241,52 @@ def test_concurrent_write_batch_is_rejected_before_second_mutation(monkeypatch) 
 
     asyncio.run(run_concurrent_batches())
     assert mutation_calls == 1
+
+
+def test_control_source_cannot_be_a_write_target(monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    app.state.devices = [
+        {"ip": "192.0.2.10", "name": "SOURCE-01", "settings": {"profile": "camera"}}
+    ]
+    app.state.control_settings = {"profile": "camera"}
+    app.state.control_device_ip = "192.0.2.10"
+    app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
+    response = client.post(
+        "/push-updates",
+        json={
+            "confirm": True,
+            "devices": [{"ip": "192.0.2.10", "magewell_id": "SOURCE-01"}],
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "The control source cannot be a write target."
+
+
+def test_verify_target_returns_only_fingerprints(monkeypatch) -> None:
+    source = {"profile": {"mode": "camera"}}
+
+    async def matching_report(*args, **kwargs):
+        return source
+
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", matching_report)
+    app.state.devices = [{"ip": "192.0.2.10", "name": "TARGET-01", "settings": {"profile": "old"}}]
+    app.state.control_device_ip = "192.0.2.20"
+    app.state.control_settings_sha256 = settings_fingerprint(source)
+    response = client.post(
+        "/verify-target",
+        json={"device": {"ip": "192.0.2.10", "magewell_id": "TARGET-01"}},
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "ip": "192.0.2.10",
+        "magewell_id": "TARGET-01",
+        "expected_settings_sha256": settings_fingerprint(source),
+        "actual_settings_sha256": settings_fingerprint(source),
+        "matches_frozen_source": True,
+    }

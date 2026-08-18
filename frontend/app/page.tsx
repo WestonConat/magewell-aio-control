@@ -17,6 +17,12 @@ interface UpdateResult {
   error?: string;
 }
 
+interface ControlSource {
+  ip: string;
+  magewell_id: string;
+  settings_sha256: string;
+}
+
 async function apiError(response: Response): Promise<string> {
   try {
     const body = await response.json();
@@ -35,6 +41,9 @@ export default function HomePage() {
     useState<Device | null>(null);
   const [selectedPushIps, setSelectedPushIps] = useState<string[]>([]);
   const [controlMessage, setControlMessage] = useState("");
+  const [controlSource, setControlSource] = useState<ControlSource | null>(
+    null,
+  );
   const [pushMessage, setPushMessage] = useState("");
   const [pushResults, setPushResults] = useState<UpdateResult[]>([]);
   const [pushInProgress, setPushInProgress] = useState(false);
@@ -91,12 +100,19 @@ export default function HomePage() {
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setControlMessage("");
+    setControlSource(null);
     setSelectedControlDevice(null);
     setPushMessage("");
     void scanNetwork(subnet, true);
   };
 
   const handleSelectToggle = (device: Device) => {
+    if (device.ip === controlSource?.ip) {
+      setPushMessage(
+        "The frozen control source cannot be selected as a write target.",
+      );
+      return;
+    }
     setSelectedPushIps((previous) =>
       previous.includes(device.ip)
         ? previous.filter((ip) => ip !== device.ip)
@@ -116,8 +132,13 @@ export default function HomePage() {
         }),
       });
       if (!response.ok) throw new Error(await apiError(response));
+      const data: ControlSource = await response.json();
+      setControlSource(data);
+      setSelectedPushIps((previous) =>
+        previous.filter((ip) => ip !== selectedControlDevice.ip),
+      );
       setControlMessage(
-        `Control device set to ${selectedControlDevice.name} (${selectedControlDevice.ip}).`,
+        `Frozen live source ${data.magewell_id} (${data.ip}); settings SHA-256 ${data.settings_sha256}.`,
       );
     } catch (controlError) {
       setControlMessage(
@@ -139,8 +160,12 @@ export default function HomePage() {
       setPushMessage("Select at least one device.");
       return;
     }
+    if (!controlSource) {
+      setPushMessage("Select and freeze the live control source first.");
+      return;
+    }
     const confirmed = window.confirm(
-      `Write control settings to exactly ${selectedPushIps.length} selected device(s)? This changes device configuration.`,
+      `Write frozen source ${controlSource.magewell_id} (${controlSource.ip}, SHA-256 ${controlSource.settings_sha256}) to exactly ${selectedPushIps.length} selected non-source device(s)? This changes device configuration.`,
     );
     if (!confirmed) {
       setPushMessage("Update cancelled; no write request was sent.");
@@ -234,6 +259,12 @@ export default function HomePage() {
       {error && <p className={styles.count}>Error: {error}</p>}
 
       <div className={styles.pushContainer}>
+        <h2>Frozen live source</h2>
+        <p>
+          {controlSource
+            ? `${controlSource.magewell_id} — ${controlSource.ip} — ${controlSource.settings_sha256}`
+            : "None selected. The embedded baseline is disabled."}
+        </p>
         <h2>Selected write targets: {selectedPushIps.length}</h2>
         {selectedPushIps.length > 0 && (
           <ul className={styles.selectedList}>
@@ -251,7 +282,10 @@ export default function HomePage() {
           onClick={pushUpdates}
           className={styles.button28}
           disabled={
-            pushInProgress || !writesEnabled || selectedPushIps.length === 0
+            pushInProgress ||
+            !writesEnabled ||
+            !controlSource ||
+            selectedPushIps.length === 0
           }
         >
           {pushInProgress
