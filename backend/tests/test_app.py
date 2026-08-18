@@ -145,12 +145,19 @@ def test_live_profile_preserves_target_local_settings() -> None:
         "name": "CONTROL",
         "wifi": [{"ssid": "control"}],
         "rec-channels": [{"dir-name": "CONTROL"}],
+        "nosignal-files": [{"name": "control.png"}],
+        "use-nosignal-file": 1,
         "enable-deinterlace": 1,
     }
     target = {
         "name": "TARGET-01",
         "wifi": [{"ssid": "target"}],
         "rec-channels": [{"dir-name": "TARGET-01"}],
+        "nosignal-files": [{"name": "target.png"}],
+        "use-nosignal-file": 0,
+        "enable-zen-master": 1,
+        "zen-master": {"registered": True},
+        "future-firmware-extension": {"mode": "target-only"},
         "enable-deinterlace": 0,
     }
     frozen = get_bulk_update_settings(
@@ -162,6 +169,11 @@ def test_live_profile_preserves_target_local_settings() -> None:
         "name": "TARGET-01",
         "wifi": [{"ssid": "target"}],
         "rec-channels": [{"dir-name": "TARGET-01"}],
+        "nosignal-files": [{"name": "target.png"}],
+        "use-nosignal-file": 0,
+        "enable-zen-master": 1,
+        "zen-master": {"registered": True},
+        "future-firmware-extension": {"mode": "target-only"},
         "enable-deinterlace": 1,
     }
     assert frozen is not source
@@ -175,12 +187,56 @@ def test_live_profile_preserves_target_local_settings() -> None:
 def test_live_profile_rejects_schema_or_identity_mismatch() -> None:
     with pytest.raises(ValueError, match="identity"):
         get_bulk_update_settings("TARGET-01", {"name": "CONTROL"}, {"name": "OTHER"})
-    with pytest.raises(ValueError, match="schemas differ"):
+    with pytest.raises(ValueError, match="missing source profile settings: profile"):
         get_bulk_update_settings(
             "TARGET-01",
             {"name": "CONTROL", "profile": "camera"},
             {"name": "TARGET-01"},
         )
+
+
+def test_control_source_classifies_target_schema_compatibility() -> None:
+    app.state.devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "SOURCE",
+            "settings": {
+                "name": "SOURCE",
+                "profile": "camera",
+                "enable-ndi-bridge": 1,
+            },
+        },
+        {
+            "ip": "192.0.2.11",
+            "name": "TARGET-PLUS",
+            "settings": {
+                "name": "TARGET-PLUS",
+                "profile": "old",
+                "enable-ndi-bridge": 0,
+                "enable-zen-master": 1,
+                "zen-master": {"registered": True},
+            },
+        },
+        {
+            "ip": "192.0.2.12",
+            "name": "TARGET-MISSING",
+            "settings": {"name": "TARGET-MISSING", "profile": "old"},
+        },
+    ]
+
+    response = client.post(
+        "/set-control",
+        json={"ip": "192.0.2.10", "magewell_id": "SOURCE"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["compatible_target_ips"] == ["192.0.2.11"]
+    assert response.json()["incompatible_targets"] == [
+        {
+            "ip": "192.0.2.12",
+            "reason": ("target schema is missing source profile settings: enable-ndi-bridge"),
+        }
+    ]
 
 
 def test_device_settings_are_not_returned_to_the_browser() -> None:

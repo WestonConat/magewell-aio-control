@@ -57,6 +57,13 @@
   font-weight: 800;
 }
 
+.blockedBadge {
+  flex-shrink: 0;
+  color: #ff826f;
+  font-size: 0.62rem;
+  font-weight: 800;
+}
+
 .cardFooter {
   display: flex;
   align-items: center;

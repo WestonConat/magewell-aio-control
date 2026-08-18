@@ -9,6 +9,7 @@ interface DeviceGridProps {
   devices: Device[];
   selectedDeviceIps: string[];
   controlSourceIp?: string;
+  incompatibleTargetReasons: Map<string, string>;
   onSelectToggle: (device: Device) => void;
   onSetControl: (device: Device) => void;
 }
@@ -17,6 +18,7 @@ const DeviceGrid: React.FC<DeviceGridProps> = ({
   devices,
   selectedDeviceIps,
   controlSourceIp,
+  incompatibleTargetReasons,
   onSelectToggle,
   onSetControl,
 }) => {
@@ -28,6 +30,7 @@ const DeviceGrid: React.FC<DeviceGridProps> = ({
           device={device}
           isSelected={selectedDeviceIps.includes(device.ip)}
           isControlSource={device.ip === controlSourceIp}
+          targetBlockedReason={incompatibleTargetReasons.get(device.ip)}
           onSelectToggle={onSelectToggle}
           onSetControl={onSetControl}
         />

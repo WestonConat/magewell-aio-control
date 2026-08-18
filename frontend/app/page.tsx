@@ -30,6 +30,8 @@ interface ControlSource {
   ip: string;
   magewell_id: string;
   settings_sha256: string;
+  compatible_target_ips: string[];
+  incompatible_targets: Array<{ ip: string; reason: string }>;
 }
 
 async function apiError(response: Response): Promise<string> {
@@ -68,9 +70,15 @@ export default function HomePage() {
   const [verificationInProgress, setVerificationInProgress] = useState(false);
   const [verificationRequired, setVerificationRequired] = useState(false);
   const [writesEnabled, setWritesEnabled] = useState(false);
-  const eligibleTargetIps = devices
-    .filter((device) => device.ip !== controlSource?.ip)
-    .map((device) => device.ip);
+  const incompatibleTargetReasons = new Map(
+    controlSource?.incompatible_targets.map((target) => [
+      target.ip,
+      target.reason,
+    ]) || [],
+  );
+  const eligibleTargetIps = controlSource
+    ? controlSource.compatible_target_ips
+    : devices.map((device) => device.ip);
   const allTargetsSelected =
     eligibleTargetIps.length > 0 &&
     eligibleTargetIps.every((ip) => selectedPushIps.includes(ip));
@@ -151,6 +159,11 @@ export default function HomePage() {
       );
       return;
     }
+    const blockedReason = incompatibleTargetReasons.get(device.ip);
+    if (blockedReason) {
+      setPushMessage(`Target ${device.ip} is blocked: ${blockedReason}`);
+      return;
+    }
     setSelectedPushIps((previous) =>
       previous.includes(device.ip)
         ? previous.filter((ip) => ip !== device.ip)
@@ -197,9 +210,10 @@ export default function HomePage() {
       setVerificationMessage("");
       setVerificationResults([]);
       setVerificationRequired(false);
-      setSelectedPushIps((previous) =>
-        previous.filter((ip) => ip !== selectedControlDevice.ip),
-      );
+      setSelectedPushIps((previous) => {
+        const compatibleIps = new Set(data.compatible_target_ips);
+        return previous.filter((ip) => compatibleIps.has(ip));
+      });
       setControlMessage(
         `Source frozen: ${data.magewell_id} (${data.ip}) · Profile ${shortHash(data.settings_sha256)}`,
       );
@@ -550,6 +564,7 @@ export default function HomePage() {
               devices={devices}
               selectedDeviceIps={selectedPushIps}
               controlSourceIp={controlSource?.ip}
+              incompatibleTargetReasons={incompatibleTargetReasons}
               onSelectToggle={handleSelectToggle}
               onSetControl={setSelectedControlDevice}
             />

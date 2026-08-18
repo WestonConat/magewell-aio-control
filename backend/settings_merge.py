@@ -15,8 +15,11 @@ TARGET_LOCAL_KEYS = frozenset(
         "rec-channels",
         "image",
         "nosignal-files",
+        "use-nosignal-file",
         "nas",
         "send-file-cloud",
+        "enable-zen-master",
+        "zen-master",
     }
 )
 
@@ -29,11 +32,15 @@ def get_bulk_update_settings(
     """Build a live-source profile while preserving target-local settings."""
     if target_settings.get("name") != target_magewell_id:
         raise ValueError("target settings identity does not match the scanned device")
-    if set(control_settings) != set(target_settings):
-        raise ValueError("source and target settings schemas differ")
+    missing_profile_keys = (set(control_settings) - TARGET_LOCAL_KEYS) - set(target_settings)
+    if missing_profile_keys:
+        missing = ", ".join(sorted(missing_profile_keys))
+        raise ValueError(f"target schema is missing source profile settings: {missing}")
 
-    merged = deepcopy(control_settings)
-    for key in TARGET_LOCAL_KEYS:
-        if key in target_settings:
-            merged[key] = deepcopy(target_settings[key])
+    # Start from the target so firmware-specific extensions remain untouched,
+    # then overlay only the source's portable Camera-profile settings.
+    merged = deepcopy(target_settings)
+    for key, value in control_settings.items():
+        if key not in TARGET_LOCAL_KEYS:
+            merged[key] = deepcopy(value)
     return merged

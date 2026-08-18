@@ -12,6 +12,7 @@ interface DeviceCardProps {
   device: Device;
   isSelected: boolean;
   isControlSource: boolean;
+  targetBlockedReason?: string;
   onSelectToggle: (device: Device) => void;
   onSetControl: (device: Device) => void;
 }
@@ -20,6 +21,7 @@ const DeviceCard: React.FC<DeviceCardProps> = ({
   device,
   isSelected,
   isControlSource,
+  targetBlockedReason,
   onSelectToggle,
   onSetControl,
 }) => {
@@ -35,6 +37,11 @@ const DeviceCard: React.FC<DeviceCardProps> = ({
           {isControlSource && (
             <span className={styles.sourceBadge}>Source</span>
           )}
+          {!isControlSource && targetBlockedReason && (
+            <span className={styles.blockedBadge} title={targetBlockedReason}>
+              Blocked
+            </span>
+          )}
         </div>
         <p className={styles.cardIp}>{device.ip}</p>
       </div>
@@ -43,12 +50,16 @@ const DeviceCard: React.FC<DeviceCardProps> = ({
           <input
             type="checkbox"
             checked={isSelected}
-            disabled={isControlSource}
+            disabled={isControlSource || Boolean(targetBlockedReason)}
             onChange={() => onSelectToggle(device)}
             className={styles.checkbox}
           />
           <span className={styles.checkboxLabel}>
-            {isSelected ? "Selected" : "Target"}
+            {targetBlockedReason
+              ? "Blocked"
+              : isSelected
+                ? "Selected"
+                : "Target"}
           </span>
         </label>
         <button

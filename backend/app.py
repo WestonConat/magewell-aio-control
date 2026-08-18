@@ -745,11 +745,37 @@ async def set_control(device: DeviceSelection) -> dict[str, Any]:
     app.state.control_settings = frozen_settings
     app.state.control_device_ip = ip
     app.state.control_settings_sha256 = fingerprint
+    compatible_target_ips = []
+    incompatible_targets = []
+    for candidate in cached_devices:
+        if candidate["ip"] == ip:
+            continue
+        candidate_settings = candidate.get("settings", {})
+        if candidate.get("read_error") or not candidate_settings:
+            incompatible_targets.append(
+                {
+                    "ip": candidate["ip"],
+                    "reason": "Latest-scan settings were not read successfully.",
+                }
+            )
+            continue
+        try:
+            get_bulk_update_settings(
+                candidate.get("name", ""),
+                frozen_settings,
+                candidate_settings,
+            )
+        except ValueError as exc:
+            incompatible_targets.append({"ip": candidate["ip"], "reason": str(exc)})
+        else:
+            compatible_target_ips.append(candidate["ip"])
     return {
         "message": "Live control settings frozen.",
         "ip": ip,
         "magewell_id": device.magewell_id,
         "settings_sha256": fingerprint,
+        "compatible_target_ips": compatible_target_ips,
+        "incompatible_targets": incompatible_targets,
     }
 
 
