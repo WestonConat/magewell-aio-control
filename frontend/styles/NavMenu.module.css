@@ -12,10 +12,10 @@
 
 .menuItem a {
   display: inline-flex;
-  min-height: 36px;
+  min-height: 34px;
   align-items: center;
-  border-radius: 8px;
-  padding: 0 11px;
+  border-bottom: 2px solid transparent;
+  padding: 0 8px;
   color: #909aa8;
   font-size: 0.78rem;
   font-weight: 700;
@@ -25,12 +25,11 @@
 }
 
 .menuItem a:hover {
-  background: #171c22;
   color: #f5f7fa;
 }
 
 .menuItem .active {
-  background: rgb(255 157 36 / 9%);
+  border-bottom-color: #ff9d24;
   color: #ffad47;
 }
 

@@ -17,10 +17,7 @@ export default function Header() {
             height={64}
             priority
           />
-          <div>
-            <strong>Magewell AIO</strong>
-            <span>Encoder control</span>
-          </div>
+          <strong>Magewell AIO</strong>
         </div>
         <NavMenu />
       </div>

@@ -3,7 +3,6 @@
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import DeviceGrid from "@/components/DeviceGrid";
 import { Device } from "@/components/DeviceCard";
-import WaterfallIcon from "@/components/Waterfall";
 import styles from "./page.module.css";
 
 const backendBaseUrl = (
@@ -345,24 +344,16 @@ export default function HomePage() {
 
   return (
     <main className={styles.main}>
-      <section className={styles.hero}>
-        <div>
-          <p className={styles.eyebrow}>Bench control</p>
-          <h1>Encoder fleet</h1>
-          <p className={styles.heroCopy}>
-            Discover devices, choose one live source, then push and verify a
-            reviewed target set.
-          </p>
-        </div>
+      <div className={styles.topBar}>
+        <h1>Encoders</h1>
         <span
-          className={`${styles.statusPill} ${
+          className={`${styles.writeStatus} ${
             writesEnabled ? styles.statusArmed : styles.statusLocked
           }`}
         >
-          <span className={styles.statusDot} />
-          Writes {writesEnabled ? "enabled" : "locked"}
+          Writes: {writesEnabled ? "enabled" : "locked"}
         </span>
-      </section>
+      </div>
 
       <section className={styles.scanPanel}>
         <form onSubmit={handleSubmit} className={styles.scanForm}>
@@ -389,60 +380,45 @@ export default function HomePage() {
             {loading ? "Scanning…" : "Scan network"}
           </button>
         </form>
-        <div className={styles.scanMeta}>
-          <div>
-            <span>Mode</span>
-            <strong>Read only</strong>
-          </div>
-          <div>
-            <span>Inventory</span>
-            <strong>
-              {loading
-                ? "Scanning…"
-                : `${devices.length} encoder${devices.length === 1 ? "" : "s"}`}
-            </strong>
-          </div>
-        </div>
+        <span className={styles.inventoryCount}>
+          {loading
+            ? "Scanning…"
+            : `${devices.length} encoder${devices.length === 1 ? "" : "s"}`}
+        </span>
         {controlMessage && <p className={styles.notice}>{controlMessage}</p>}
         {error && <p className={styles.errorNotice}>{error}</p>}
       </section>
 
       {loading ? (
         <section className={styles.loadingState}>
-          <WaterfallIcon />
-          <p>Reading the approved subnet…</p>
+          <p>Scanning {subnet}…</p>
         </section>
       ) : devices.length > 0 ? (
         <>
           <section className={styles.workflowPanel}>
             <div className={styles.sectionHeading}>
-              <div>
-                <p className={styles.eyebrow}>Current batch</p>
-                <h2>Source and targets</h2>
-              </div>
+              <h2>Batch</h2>
               {verificationRequired && (
-                <span className={styles.verifyBadge}>
-                  Verification required
+                <span className={styles.verifyRequired}>
+                  Verify before writing again
                 </span>
               )}
             </div>
 
             <div className={styles.workflowGrid}>
               <div className={styles.summaryCard}>
-                <span className={styles.summaryLabel}>Live source</span>
-                <strong>
-                  {controlSource?.magewell_id || "Choose an encoder below"}
-                </strong>
+                <span className={styles.summaryLabel}>Source</span>
+                <strong>{controlSource?.magewell_id || "Not selected"}</strong>
                 <span className={styles.summaryMeta}>
                   {controlSource
                     ? `${controlSource.ip} · Profile ${shortHash(
                         controlSource.settings_sha256,
                       )}`
-                    : "Embedded baselines are disabled"}
+                    : "Choose a source from the encoder list"}
                 </span>
               </div>
               <div className={styles.summaryCard}>
-                <span className={styles.summaryLabel}>Write targets</span>
+                <span className={styles.summaryLabel}>Targets</span>
                 <strong>
                   {selectedPushIps.length} selected
                   {eligibleTargetIps.length > 0
@@ -451,14 +427,8 @@ export default function HomePage() {
                 </strong>
                 <span className={styles.summaryMeta}>
                   {selectedPushIps.length > 0
-                    ? selectedDevices
-                        .slice(0, 3)
-                        .map((device) => device.name)
-                        .join(", ") +
-                      (selectedDevices.length > 3
-                        ? ` +${selectedDevices.length - 3} more`
-                        : "")
-                    : "No target devices selected"}
+                    ? `${selectedDevices.length} encoder${selectedDevices.length === 1 ? "" : "s"} queued`
+                    : "No targets selected"}
                 </span>
               </div>
             </div>
@@ -552,10 +522,7 @@ export default function HomePage() {
 
           <section className={styles.encodersSection}>
             <div className={styles.sectionHeading}>
-              <div>
-                <p className={styles.eyebrow}>Inventory</p>
-                <h2>{devices.length} encoders</h2>
-              </div>
+              <h2>Inventory ({devices.length})</h2>
               <div className={styles.bulkActions}>
                 <button
                   className={styles.textButton}
@@ -590,9 +557,7 @@ export default function HomePage() {
         </>
       ) : (
         <section className={styles.emptyState}>
-          <p className={styles.eyebrow}>No inventory yet</p>
-          <h2>Start with a read-only scan</h2>
-          <p>The app never scans until you click the button.</p>
+          <p>No encoders loaded.</p>
         </section>
       )}
 
@@ -605,11 +570,10 @@ export default function HomePage() {
             className={styles.modal}
             onClick={(event) => event.stopPropagation()}
           >
-            <h2>Select Read-Only Control Source</h2>
+            <h2>Set source</h2>
             <p>
-              Use{" "}
               <strong>{selectedControlDevice.name || "Unnamed Device"}</strong>{" "}
-              ({selectedControlDevice.ip}) as the settings source?
+              ({selectedControlDevice.ip})
             </p>
             <div className={styles.modalButtons}>
               <button
@@ -622,7 +586,7 @@ export default function HomePage() {
                 onClick={handleConfirmControl}
                 className={styles.primaryButton}
               >
-                Confirm Source
+                Set source
               </button>
             </div>
           </div>

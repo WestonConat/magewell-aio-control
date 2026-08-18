@@ -3,13 +3,12 @@
   top: 0;
   z-index: 40;
   border-bottom: 1px solid #242a32;
-  background: rgb(10 13 17 / 90%);
-  backdrop-filter: blur(14px);
+  background: #0a0d11;
 }
 
 .headerInner {
   width: min(1480px, 100%);
-  min-height: 74px;
+  min-height: 56px;
   margin: 0 auto;
   padding: 0 32px;
   display: flex;
@@ -25,40 +24,25 @@
 }
 
 .brand img {
-  width: 58px;
-  height: 58px;
+  width: 42px;
+  height: 42px;
   object-fit: contain;
-}
-
-.brand div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
 }
 
 .brand strong {
   color: #f5f7fa;
-  font-size: 0.94rem;
+  font-size: 0.85rem;
   letter-spacing: -0.01em;
-}
-
-.brand span {
-  color: #818b98;
-  font-size: 0.72rem;
 }
 
 @media (max-width: 640px) {
   .headerInner {
-    min-height: 64px;
+    min-height: 52px;
     padding: 0 16px;
   }
 
   .brand img {
-    width: 48px;
-    height: 48px;
-  }
-
-  .brand div {
-    display: none;
+    width: 38px;
+    height: 38px;
   }
 }
