@@ -195,12 +195,30 @@ docker compose cp backend:/var/lib/magewell-firmware-recovery \
 
 Magewell warns not to disconnect power or operate the unit during installation; a successful
 update reboots automatically. Exact post-reboot identity, credentials, version, idle state,
-and settings fingerprint are verified. Any settings change returns
-`firmware-verified-settings-changed` with key names only and stops fleet progression for
-operator review. If upload/install acceptance is ambiguous, the device does not return within
-ten minutes, its identity/version differs, or recovery is uncertain, do not retry. Relock
-firmware updates and recover that one device through the manufacturer UI or Magewell support
-before continuing. Firmware downgrade is not an assumed recovery path.
+and settings preservation are verified. Pre-update safety remains strict about Wi-Fi
+search/connect activity. Post-reboot verification may report those two background bits after
+the firmware is installed, but still requires no streaming, recording, update, reset, loading,
+test, occupancy, or reboot activity. The settings comparison ignores only Wi-Fi RSSI and the
+exact disabled/default NDI Bridge, ZEN Master, live-keep-last, and PID fields observed when
+2.4.288 extends an older schema. Every other changed path returns
+`firmware-verified-settings-changed` and stops fleet progression.
+
+If the original invocation stops after an accepted install, relock every effect first. Never
+rerun `update-one`. Use the durable receipt for a read-only recovery verification:
+
+```bash
+docker compose exec -T backend python -m backend.firmware_cli verify-one \
+  --ip 192.0.2.10 \
+  --expected-name ENCODER-01 \
+  --expected-serial SERIAL_FROM_PREFLIGHT \
+  --expected-eth-mac MAC_FROM_PREFLIGHT \
+  --target-version 2.4.288
+```
+
+If upload/install acceptance is ambiguous, the device does not return within ten minutes, its
+identity/version differs, or recovery is uncertain, do not retry. Relock firmware updates and
+recover that one device through the manufacturer UI or Magewell support before continuing.
+Firmware downgrade is not an assumed recovery path.
 
 ## Controlled live-run checklist
 

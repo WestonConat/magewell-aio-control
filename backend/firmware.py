@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import ipaddress
 import json
@@ -243,11 +244,12 @@ def _assert_idle_activity_entry(entry: Any, context: str) -> None:
         raise FirmwareSafetyError(f"Device {context} is active or not in a known idle state.")
 
 
-def assert_idle_status(status: dict[str, Any]) -> None:
+def assert_idle_status(status: dict[str, Any], *, post_update: bool = False) -> int:
     if not isinstance(status, dict):
         raise FirmwareSafetyError("Device status response is invalid.")
     current_status = _required_int(status, "cur-status", "status")
-    blocked_bits = current_status & BLOCKED_STATUS_MASK
+    allowed_background_bits = STATUS_SEARCH_WIFI | STATUS_CONNECT_WIFI if post_update else 0
+    blocked_bits = current_status & (BLOCKED_STATUS_MASK & ~allowed_background_bits)
     if blocked_bits:
         raise FirmwareSafetyError(
             f"Device has blocked running-status bits set: 0x{blocked_bits:x}."
@@ -256,22 +258,42 @@ def assert_idle_status(status: dict[str, Any]) -> None:
     live_status = status.get("live-status")
     if not isinstance(live_status, dict):
         raise FirmwareSafetyError("Device status is missing a valid 'live-status' object.")
-    if "result" in live_status and _required_int(live_status, "result", "live status") != 27:
-        raise FirmwareSafetyError("Device live status is not in the initial/idle state.")
+    live_result = None
+    if "result" in live_status:
+        live_result = _required_int(live_status, "result", "live status")
+        allowed_live_results = (0, 27) if post_update else (27,)
+        if live_result not in allowed_live_results:
+            raise FirmwareSafetyError("Device live status is not in a known idle state.")
     if "run-ms" in live_status and _required_int(live_status, "run-ms", "live status") != 0:
         raise FirmwareSafetyError("Device live status reports elapsed streaming time.")
     streams = live_status.get("live")
     if not isinstance(streams, list):
         raise FirmwareSafetyError("Device live status is missing a valid stream list.")
+    if live_result == 0 and streams:
+        raise FirmwareSafetyError(
+            "Post-update live wrapper result 0 is valid only with an empty stream list."
+        )
     for stream in streams:
         _assert_idle_activity_entry(stream, "live stream")
 
     record_status = status.get("rec-status")
     if not isinstance(record_status, dict):
         raise FirmwareSafetyError("Device status is missing a valid 'rec-status' object.")
+    record_result = None
+    if "result" in record_status:
+        record_result = _required_int(record_status, "result", "record status")
+        allowed_record_results = (0, 27) if post_update else (27,)
+        if record_result not in allowed_record_results:
+            raise FirmwareSafetyError("Device record status is not in a known idle state.")
+    if "run-ms" in record_status and _required_int(record_status, "run-ms", "record status") != 0:
+        raise FirmwareSafetyError("Device record status reports elapsed recording time.")
     recordings = record_status.get("rec")
     if not isinstance(recordings, list):
         raise FirmwareSafetyError("Device record status is missing a valid recording list.")
+    if record_result == 0 and recordings:
+        raise FirmwareSafetyError(
+            "Post-update record wrapper result 0 is valid only with an empty recording list."
+        )
     for recording in recordings:
         _assert_idle_activity_entry(recording, "recording")
 
@@ -288,6 +310,7 @@ def assert_idle_status(status: dict[str, Any]) -> None:
         raise FirmwareSafetyError("Device firmware mode is not idle.")
     if not isinstance(upgrade_status.get("client-id"), str):
         raise FirmwareSafetyError("Device firmware client identity is invalid.")
+    return current_status & allowed_background_bits
 
 
 def active_stream_count(status: dict[str, Any]) -> int:
@@ -630,12 +653,17 @@ async def wait_for_verified_firmware(
                 if report.get("name") != expected_name:
                     raise FirmwareSafetyError("Post-update device display-name mismatch.")
                 status = await get_device_status(session, ip, cookie_header)
-                assert_idle_status(status)
+                try:
+                    background_status_bits = assert_idle_status(status, post_update=True)
+                except FirmwareSafetyError as exc:
+                    last_error = str(exc)
+                    continue
                 return (
                     {
                         **observed,
                         "name": report.get("name"),
                         "settings_sha256": settings_fingerprint(report),
+                        "background_status_bits": background_status_bits,
                     },
                     report,
                 )
@@ -657,6 +685,125 @@ def settings_change_summary(before: dict[str, Any], after: dict[str, Any]) -> di
         "added_top_level_keys": sorted(after_keys - before_keys),
         "removed_top_level_keys": sorted(before_keys - after_keys),
         "changed_top_level_keys": sorted(key for key in common if before[key] != after[key]),
+    }
+
+
+def _remove_expected_addition(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    key: str,
+    expected_value: Any,
+    path: str,
+    accepted: list[str],
+) -> None:
+    if key not in before and after.get(key) == expected_value:
+        after.pop(key)
+        accepted.append(path)
+
+
+def _difference_paths(before: Any, after: Any, path: tuple[str, ...] = ()) -> list[str]:
+    if type(before) is not type(after):
+        return [".".join(path) or "<root>"]
+    if isinstance(before, dict):
+        differences: list[str] = []
+        for key in sorted(set(before) | set(after)):
+            child_path = (*path, str(key))
+            if key not in before or key not in after:
+                differences.append(".".join(child_path))
+            else:
+                differences.extend(_difference_paths(before[key], after[key], child_path))
+        return differences
+    if isinstance(before, list):
+        differences = []
+        if len(before) != len(after):
+            differences.append(".".join((*path, "length")))
+        for index, (before_item, after_item) in enumerate(zip(before, after)):
+            differences.extend(_difference_paths(before_item, after_item, (*path, str(index))))
+        return differences
+    return [] if before == after else [".".join(path) or "<root>"]
+
+
+def settings_preservation_report(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    normalized_before = copy.deepcopy(before)
+    normalized_after = copy.deepcopy(after)
+    ignored_transient_paths: list[str] = []
+    for label, settings in (("before", normalized_before), ("after", normalized_after)):
+        wifi_entries = settings.get("wifi")
+        if isinstance(wifi_entries, list):
+            for index, entry in enumerate(wifi_entries):
+                if isinstance(entry, dict) and "level" in entry:
+                    entry.pop("level")
+                    ignored_transient_paths.append(f"{label}.wifi.{index}.level")
+
+    accepted_additions: list[str] = []
+    expected_top_level_additions = {
+        "enable-ndi-bridge": 0,
+        "ndi-bridge": {
+            "bridge-name": "",
+            "encryp-key": "",
+            "groups": "Public",
+            "ip-addr": "",
+            "port": 5990,
+        },
+        "enable-zen-master": 0,
+        "zen-master": {
+            "host": "",
+            "is-key-valid": 0,
+            "tunnel-port": 0,
+            "user-name": "",
+        },
+    }
+    for key, expected_value in expected_top_level_additions.items():
+        _remove_expected_addition(
+            normalized_before,
+            normalized_after,
+            key,
+            expected_value,
+            key,
+            accepted_additions,
+        )
+
+    before_living = normalized_before.get("living")
+    after_living = normalized_after.get("living")
+    if isinstance(before_living, dict) and isinstance(after_living, dict):
+        _remove_expected_addition(
+            before_living,
+            after_living,
+            "live-keep-last",
+            1,
+            "living.live-keep-last",
+            accepted_additions,
+        )
+
+    before_servers = normalized_before.get("stream-server")
+    after_servers = normalized_after.get("stream-server")
+    server_defaults = {
+        "audio-pids": [0] * 8,
+        "is-custom-pid": 0,
+        "pcr-pid": 0,
+        "pmt-pid": 0,
+        "video-pid": 0,
+    }
+    if isinstance(before_servers, list) and isinstance(after_servers, list):
+        for index, (before_server, after_server) in enumerate(zip(before_servers, after_servers)):
+            if not isinstance(before_server, dict) or not isinstance(after_server, dict):
+                continue
+            for key, expected_value in server_defaults.items():
+                _remove_expected_addition(
+                    before_server,
+                    after_server,
+                    key,
+                    expected_value,
+                    f"stream-server.{index}.{key}",
+                    accepted_additions,
+                )
+
+    unexpected_change_paths = _difference_paths(normalized_before, normalized_after)
+    return {
+        "preserved": not unexpected_change_paths,
+        "accepted_firmware_additions": sorted(accepted_additions),
+        "ignored_transient_paths": sorted(ignored_transient_paths),
+        "unexpected_change_paths": unexpected_change_paths,
     }
 
 
@@ -691,6 +838,96 @@ async def preflight_one(
         **observed,
         "active_streams": 0,
         "settings_sha256": settings_fingerprint(report),
+    }
+
+
+async def verify_one(
+    ip: str,
+    expected_name: str,
+    expected_serial: str,
+    expected_eth_mac: str,
+    target_version: str,
+    *,
+    recovery_root: Path | None = None,
+) -> dict[str, Any]:
+    if enabled_effect_modes():
+        raise FirmwareSafetyError("Lock all effect modes before recovery verification.")
+    normalized_ip = validate_target_ip(ip)
+    manifest = approved_manifest(target_version)
+    run_dir = (
+        (recovery_root or get_recovery_root())
+        / _safe_identity_component(expected_serial.strip())
+        / manifest.sha256
+    )
+    backup_path = run_dir / "pre-firmware-settings.json"
+    lock_path = run_dir / "effect.lock"
+    if not backup_path.is_file() or not lock_path.is_file():
+        raise FirmwareSafetyError("The durable firmware recovery receipt is incomplete.")
+    try:
+        backup_payload = json.loads(backup_path.read_text(encoding="utf-8"))
+        lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise FirmwareSafetyError("The durable firmware recovery receipt is unreadable.") from exc
+    expected_receipt = {
+        "ip": normalized_ip,
+        "name": expected_name,
+        "serial": expected_serial.strip(),
+        "eth_mac": expected_eth_mac.strip().lower(),
+        "artifact_sha256": manifest.sha256,
+    }
+    if any(lock_payload.get(key) != value for key, value in expected_receipt.items()):
+        raise FirmwareSafetyError("The recovery receipt does not match the approved target.")
+    before_settings = backup_payload.get("settings")
+    if not isinstance(before_settings, dict):
+        raise FirmwareSafetyError("The recovery backup contains no valid settings snapshot.")
+
+    username, password = get_device_credentials()
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0)) as session:
+        cookie_header = await login_device(
+            session,
+            normalized_ip,
+            username,
+            md5_hash(password),
+            expected_name,
+        )
+        info = await get_device_info(session, normalized_ip, cookie_header)
+        observed = validate_device_info(info, target_version)
+        assert_operator_approved_identity(observed, expected_serial, expected_eth_mac)
+        if not observed["already_current"]:
+            raise FirmwareSafetyError(
+                f"Recovery verification found firmware {observed['firmware']!r}, not {target_version}."
+            )
+        report = await get_device_report_with_login(
+            session, normalized_ip, username, password, timeout=20.0
+        )
+        if report.get("name") != expected_name:
+            raise FirmwareSafetyError("Recovery verification found a display-name mismatch.")
+        status = await get_device_status(session, normalized_ip, cookie_header)
+        background_status_bits = assert_idle_status(status, post_update=True)
+
+    preservation = settings_preservation_report(before_settings, report)
+    settings_changes = settings_change_summary(before_settings, report)
+    result_status = (
+        "recovery-verified" if preservation["preserved"] else "recovery-verified-settings-changed"
+    )
+    record_effect_state(
+        run_dir,
+        result_status,
+        firmware=observed["firmware"],
+        background_status_bits=background_status_bits,
+        pre_settings_sha256=settings_fingerprint(before_settings),
+        post_settings_sha256=settings_fingerprint(report),
+        preservation=preservation,
+    )
+    return {
+        "status": result_status,
+        "ip": normalized_ip,
+        "name": expected_name,
+        **observed,
+        "background_status_bits": background_status_bits,
+        "settings_changes": settings_changes,
+        "preservation": preservation,
+        "recovery_state": str(run_dir),
     }
 
 
@@ -813,7 +1050,8 @@ async def update_one(
         pre_settings_sha256 = settings_fingerprint(settings)
         post_settings_sha256 = settings_fingerprint(post_settings)
         settings_changes = settings_change_summary(settings, post_settings)
-        if pre_settings_sha256 != post_settings_sha256:
+        preservation = settings_preservation_report(settings, post_settings)
+        if not preservation["preserved"]:
             result_status = "firmware-verified-settings-changed"
             record_effect_state(
                 run_dir,
@@ -821,6 +1059,7 @@ async def update_one(
                 pre_settings_sha256=pre_settings_sha256,
                 post_settings_sha256=post_settings_sha256,
                 settings_changes=settings_changes,
+                preservation=preservation,
             )
         else:
             result_status = "updated-and-verified"
@@ -828,6 +1067,8 @@ async def update_one(
                 run_dir,
                 result_status,
                 settings_sha256=post_settings_sha256,
+                pre_settings_sha256=pre_settings_sha256,
+                preservation=preservation,
             )
         return {
             "status": result_status,
@@ -839,4 +1080,5 @@ async def update_one(
             "install": install,
             "verified": verified,
             "settings_changes": settings_changes,
+            "preservation": preservation,
         }

@@ -21,9 +21,11 @@ from backend.firmware import (
     assert_idle_status,
     open_validated_artifact,
     require_firmware_effects,
+    settings_preservation_report,
     update_one,
     validate_artifact,
     validate_device_info,
+    verify_one,
     write_recovery_backup,
 )
 
@@ -275,6 +277,62 @@ def test_documented_empty_and_configured_idle_activity_are_accepted() -> None:
     ]
     assert_idle_status(configured_idle)
 
+    current_firmware_idle = valid_status()
+    current_firmware_idle["live-status"]["result"] = 0
+    current_firmware_idle["rec-status"].update({"result": 0, "run-ms": 0})
+    with pytest.raises(FirmwareSafetyError, match="live status"):
+        assert_idle_status(current_firmware_idle)
+    assert_idle_status(current_firmware_idle, post_update=True)
+
+
+def test_background_wifi_is_allowed_only_for_post_update_verification() -> None:
+    status = valid_status()
+    status["cur-status"] = 0x400010
+    with pytest.raises(FirmwareSafetyError, match="running-status"):
+        assert_idle_status(status)
+    assert assert_idle_status(status, post_update=True) == 0x400000
+
+
+def test_post_update_wrapper_result_zero_requires_empty_activity_lists() -> None:
+    live = valid_status()
+    live["live-status"].update(
+        {
+            "result": 0,
+            "live": [
+                {
+                    "id": 0,
+                    "type": 130,
+                    "is-use": 1,
+                    "is-skd-runnung": 0,
+                    "result": 27,
+                    "run-ms": 0,
+                }
+            ],
+        }
+    )
+    with pytest.raises(FirmwareSafetyError, match="empty stream list"):
+        assert_idle_status(live, post_update=True)
+
+    recording = valid_status()
+    recording["rec-status"].update(
+        {
+            "result": 0,
+            "run-ms": 0,
+            "rec": [
+                {
+                    "id": 1,
+                    "type": 1,
+                    "is-use": 1,
+                    "is-skd-runnung": 0,
+                    "result": 27,
+                    "run-ms": 0,
+                }
+            ],
+        }
+    )
+    with pytest.raises(FirmwareSafetyError, match="empty recording list"):
+        assert_idle_status(recording, post_update=True)
+
 
 def test_scheduled_live_and_recording_activity_are_blocked() -> None:
     scheduled_live = valid_status()
@@ -331,6 +389,57 @@ def test_device_info_requires_exact_immutable_identity() -> None:
 def test_device_info_blocks_downgrade() -> None:
     with pytest.raises(FirmwareSafetyError, match="downgrade"):
         validate_device_info(valid_info("2.4.288"), "2.4.210")
+
+
+def test_settings_preservation_accepts_only_observed_firmware_defaults_and_transients() -> None:
+    before = {
+        "name": "ENCODER-01",
+        "profile": "camera",
+        "living": {"ttl": 0},
+        "stream-server": [{"id": 0, "name": "SRT"}],
+        "wifi": [{"ssid": "", "level": -74}],
+    }
+    after = copy.deepcopy(before)
+    after["wifi"][0]["level"] = -76
+    after.update(
+        {
+            "enable-ndi-bridge": 0,
+            "ndi-bridge": {
+                "bridge-name": "",
+                "encryp-key": "",
+                "groups": "Public",
+                "ip-addr": "",
+                "port": 5990,
+            },
+            "enable-zen-master": 0,
+            "zen-master": {
+                "host": "",
+                "is-key-valid": 0,
+                "tunnel-port": 0,
+                "user-name": "",
+            },
+        }
+    )
+    after["living"]["live-keep-last"] = 1
+    after["stream-server"][0].update(
+        {
+            "audio-pids": [0] * 8,
+            "is-custom-pid": 0,
+            "pcr-pid": 0,
+            "pmt-pid": 0,
+            "video-pid": 0,
+        }
+    )
+    report = settings_preservation_report(before, after)
+    assert report["preserved"] is True
+    assert report["unexpected_change_paths"] == []
+    assert "enable-zen-master" in report["accepted_firmware_additions"]
+    assert report["ignored_transient_paths"] == ["after.wifi.0.level", "before.wifi.0.level"]
+
+    after["profile"] = "unexpected-change"
+    changed = settings_preservation_report(before, after)
+    assert changed["preserved"] is False
+    assert changed["unexpected_change_paths"] == ["profile"]
 
 
 def test_recovery_backup_is_private_durable_and_never_overwritten(tmp_path) -> None:
@@ -602,4 +711,89 @@ def test_changed_settings_after_backup_stop_before_upload(monkeypatch, tmp_path)
     run_dir = tmp_path / "recovery" / "A305200908002" / digest
     assert json.loads((run_dir / "firmware-state.json").read_text())["state"] == (
         "pre-upload-settings-changed"
+    )
+
+
+def test_recovery_verification_is_read_only_and_accepts_known_post_update_shape(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("ALLOWED_SUBNET", "192.0.2.0/24")
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "false")
+    monkeypatch.setenv("ENABLE_CREDENTIAL_ROTATION", "false")
+    monkeypatch.setenv("ENABLE_FIRMWARE_UPDATES", "false")
+    artifact_path = tmp_path / ARTIFACT_FILENAME
+    digest = install_test_manifest(monkeypatch, artifact_path, b"artifact")
+    before = {
+        "name": "ENCODER-01",
+        "profile": "camera",
+        "wifi": [{"ssid": "", "level": -74}],
+    }
+    after = copy.deepcopy(before)
+    after["wifi"][0]["level"] = -76
+    after.update(
+        {
+            "enable-ndi-bridge": 0,
+            "ndi-bridge": {
+                "bridge-name": "",
+                "encryp-key": "",
+                "groups": "Public",
+                "ip-addr": "",
+                "port": 5990,
+            },
+            "enable-zen-master": 0,
+            "zen-master": {
+                "host": "",
+                "is-key-valid": 0,
+                "tunnel-port": 0,
+                "user-name": "",
+            },
+        }
+    )
+    run_dir = acquire_effect_state(tmp_path / "recovery", valid_preflight(), {"sha256": digest})
+    write_recovery_backup(
+        run_dir,
+        "192.0.2.10",
+        "ENCODER-01",
+        before,
+        valid_preflight(),
+    )
+
+    async def fake_login(*args, **kwargs):
+        return "sid=test"
+
+    async def fake_info(*args, **kwargs):
+        return valid_info(TARGET_VERSION)
+
+    async def fake_report(*args, **kwargs):
+        return copy.deepcopy(after)
+
+    async def fake_status(*args, **kwargs):
+        status = valid_status()
+        status["cur-status"] = 0x400010
+        status["live-status"]["result"] = 0
+        status["rec-status"].update({"result": 0, "run-ms": 0})
+        return status
+
+    monkeypatch.setattr(firmware.aiohttp, "ClientSession", FakeClientSession)
+    monkeypatch.setattr(firmware, "login_device", fake_login)
+    monkeypatch.setattr(firmware, "get_device_credentials", lambda: ("Admin", "password"))
+    monkeypatch.setattr(firmware, "get_device_info", fake_info)
+    monkeypatch.setattr(firmware, "get_device_report_with_login", fake_report)
+    monkeypatch.setattr(firmware, "get_device_status", fake_status)
+
+    result = asyncio.run(
+        verify_one(
+            "192.0.2.10",
+            "ENCODER-01",
+            "A305200908002",
+            "d0:c8:57:80:3a:70",
+            TARGET_VERSION,
+            recovery_root=tmp_path / "recovery",
+        )
+    )
+    assert result["status"] == "recovery-verified"
+    assert result["background_status_bits"] == 0x400000
+    assert result["preservation"]["preserved"] is True
+    assert json.loads((run_dir / "firmware-state.json").read_text())["state"] == (
+        "recovery-verified"
     )
