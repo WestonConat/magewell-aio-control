@@ -17,6 +17,16 @@ interface UpdateResult {
   error?: string;
 }
 
+interface VerificationResult {
+  ip: string;
+  magewell_id: string;
+  expected_settings_sha256?: string;
+  actual_settings_sha256?: string;
+  matches_expected_profile: boolean;
+  verification_attempts?: number;
+  error?: string;
+}
+
 interface ControlSource {
   ip: string;
   magewell_id: string;
@@ -47,6 +57,12 @@ export default function HomePage() {
   const [pushMessage, setPushMessage] = useState("");
   const [pushResults, setPushResults] = useState<UpdateResult[]>([]);
   const [pushInProgress, setPushInProgress] = useState(false);
+  const [verificationMessage, setVerificationMessage] = useState("");
+  const [verificationResults, setVerificationResults] = useState<
+    VerificationResult[]
+  >([]);
+  const [verificationInProgress, setVerificationInProgress] = useState(false);
+  const [verificationRequired, setVerificationRequired] = useState(false);
   const [writesEnabled, setWritesEnabled] = useState(false);
 
   useEffect(() => {
@@ -78,6 +94,9 @@ export default function HomePage() {
     setDevices([]);
     setSelectedPushIps([]);
     setPushResults([]);
+    setVerificationMessage("");
+    setVerificationResults([]);
+    setVerificationRequired(false);
     try {
       const url = `${backendBaseUrl}/discover-magewell?subnet=${encodeURIComponent(
         subnetToScan,
@@ -107,6 +126,12 @@ export default function HomePage() {
   };
 
   const handleSelectToggle = (device: Device) => {
+    if (verificationRequired) {
+      setPushMessage(
+        "Verify the just-written target selection before changing targets.",
+      );
+      return;
+    }
     if (device.ip === controlSource?.ip) {
       setPushMessage(
         "The frozen control source cannot be selected as a write target.",
@@ -134,6 +159,9 @@ export default function HomePage() {
       if (!response.ok) throw new Error(await apiError(response));
       const data: ControlSource = await response.json();
       setControlSource(data);
+      setVerificationMessage("");
+      setVerificationResults([]);
+      setVerificationRequired(false);
       setSelectedPushIps((previous) =>
         previous.filter((ip) => ip !== selectedControlDevice.ip),
       );
@@ -190,7 +218,15 @@ export default function HomePage() {
       if (!response.ok) throw new Error(await apiError(response));
       const data = await response.json();
       setPushResults(data.results || []);
-      setPushMessage("Device update finished. Review every result below.");
+      const requiresReadBack = (data.results || []).some(
+        (result: UpdateResult) => result.status === "updated",
+      );
+      setVerificationRequired(requiresReadBack);
+      setPushMessage(
+        requiresReadBack
+          ? "Write response received. Read-back verification is required before another write."
+          : "Device update finished without an updated target. Review every result below.",
+      );
     } catch (pushError) {
       setPushMessage(
         `Device update failed: ${pushError instanceof Error ? pushError.message : "unknown error"}`,
@@ -198,6 +234,77 @@ export default function HomePage() {
     } finally {
       setPushInProgress(false);
     }
+  };
+
+  const verifySelectedTargets = async () => {
+    if (!controlSource) {
+      setVerificationMessage(
+        "Select and freeze the live control source first.",
+      );
+      return;
+    }
+    const selectedDevices = devices.filter((device) =>
+      selectedPushIps.includes(device.ip),
+    );
+    if (selectedDevices.length === 0) {
+      setVerificationMessage(
+        "Select at least one non-source target to verify.",
+      );
+      return;
+    }
+
+    setVerificationInProgress(true);
+    setVerificationMessage("Reading back selected targets...");
+    setVerificationResults([]);
+    const results: VerificationResult[] = [];
+    for (const device of selectedDevices) {
+      try {
+        const response = await fetch(`${backendBaseUrl}/verify-target`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Magewell-Operator-Intent": "confirmed",
+          },
+          body: JSON.stringify({
+            device: { ip: device.ip, magewell_id: device.name },
+          }),
+        });
+        if (!response.ok) throw new Error(await apiError(response));
+        const result: VerificationResult = await response.json();
+        results.push(result);
+        setVerificationResults([...results]);
+        if (!result.matches_expected_profile) break;
+      } catch (verificationError) {
+        results.push({
+          ip: device.ip,
+          magewell_id: device.name,
+          matches_expected_profile: false,
+          error:
+            verificationError instanceof Error
+              ? verificationError.message
+              : "unknown verification error",
+        });
+        setVerificationResults([...results]);
+        break;
+      }
+    }
+
+    const allVerified =
+      results.length === selectedDevices.length &&
+      results.every((result) => result.matches_expected_profile);
+    if (allVerified) {
+      setVerificationRequired(false);
+      setSelectedPushIps([]);
+      setVerificationMessage(
+        `Read-back verified ${results.length} target${results.length === 1 ? "" : "s"}; the next target selection is unlocked.`,
+      );
+    } else {
+      setVerificationRequired(true);
+      setVerificationMessage(
+        "Read-back stopped on the first mismatch or error. Keep writes stopped and investigate before retrying.",
+      );
+    }
+    setVerificationInProgress(false);
   };
 
   return (
@@ -283,6 +390,8 @@ export default function HomePage() {
           className={styles.button28}
           disabled={
             pushInProgress ||
+            verificationInProgress ||
+            verificationRequired ||
             !writesEnabled ||
             !controlSource ||
             selectedPushIps.length === 0
@@ -292,6 +401,20 @@ export default function HomePage() {
             ? "Updating..."
             : "Write Settings to Selected Devices"}
         </button>
+        <button
+          onClick={verifySelectedTargets}
+          className={styles.button28}
+          disabled={
+            pushInProgress ||
+            verificationInProgress ||
+            !controlSource ||
+            selectedPushIps.length === 0
+          }
+        >
+          {verificationInProgress
+            ? "Verifying..."
+            : "Verify Selected Targets (read only)"}
+        </button>
         {pushMessage && <p className={styles.pushResult}>{pushMessage}</p>}
         {pushResults.length > 0 && (
           <ul className={styles.selectedList}>
@@ -299,6 +422,29 @@ export default function HomePage() {
               <li key={result.ip}>
                 {result.magewell_id} — {result.ip}: {result.status}
                 {result.error ? ` (${result.error})` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
+        {verificationMessage && (
+          <p className={styles.pushResult}>{verificationMessage}</p>
+        )}
+        {verificationResults.length > 0 && (
+          <ul className={styles.selectedList}>
+            {verificationResults.map((result) => (
+              <li key={result.ip}>
+                {result.magewell_id} — {result.ip}:{" "}
+                {result.matches_expected_profile ? "VERIFIED" : "STOP"}
+                {result.verification_attempts
+                  ? ` after ${result.verification_attempts} read${result.verification_attempts === 1 ? "" : "s"}`
+                  : ""}
+                {result.error ? ` (${result.error})` : ""}
+                {result.expected_settings_sha256
+                  ? ` — expected ${result.expected_settings_sha256}`
+                  : ""}
+                {result.actual_settings_sha256
+                  ? ` — actual ${result.actual_settings_sha256}`
+                  : ""}
               </li>
             ))}
           </ul>

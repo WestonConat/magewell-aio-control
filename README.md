@@ -119,8 +119,10 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
 credentials, an explicit UI confirmation, and a validated non-empty target set. Only one
 write batch can run at a time. The mutation call is intentionally not retried, preventing
-an ambiguous response from causing a silent second submission. The UI reports success or
-failure for every target.
+an ambiguous response from causing a silent second submission. After an accepted write,
+the UI locks target changes and further writes until the operator runs its read-only
+verification. Verification stops on the first mismatch or read error and reports each
+device's expected and actual fingerprint.
 
 Credential rotation has a separate `ENABLE_CREDENTIAL_ROTATION` lock and accepts exactly
 one target per request. A fresh mixed-credential inventory classifies devices as `old`,
@@ -159,9 +161,11 @@ Complete this checklist during a supervised bench session:
    SHA-256, and select exactly one staged non-source target.
 9. Review the displayed source-to-target mapping, submit once, and wait for that target's
    result. Do not proceed on an error or unknown response.
-10. Run the read-only target verification and confirm its settings SHA-256 matches the
-    target-specific expected profile. Verify the target identity, network reachability,
-    and Camera profile directly in the Magewell UI as an independent check.
+10. Click **Verify Selected Targets (read only)** and confirm every result is `VERIFIED`
+    with matching expected and actual SHA-256 values. The app stops verification on the
+    first mismatch or read error and keeps the next write locked. Verify the target
+    identity, network reachability, and Camera profile directly in the Magewell UI as an
+    independent check.
     Only then repeat with the next small, explicitly reviewed target set. Keep each batch
     within `MAX_UPDATE_DEVICES`; never raise the cap silently.
 11. At the end, set `ENABLE_DEVICE_WRITES=false`, run
