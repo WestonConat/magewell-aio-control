@@ -74,6 +74,7 @@ export default function BulkUpdatePage() {
         `${backendBaseUrl}/bulk-update?confirm=true`,
         {
           method: "POST",
+          headers: { "X-Magewell-Operator-Intent": "confirmed" },
           body: formData,
         },
       );

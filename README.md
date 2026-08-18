@@ -90,7 +90,10 @@ NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000 npm --prefix frontend run dev
 | `LOG_LEVEL` | `INFO` | Backend logging level; credentials, cookies, reports, and settings are not logged. |
 
 The Compose ports are intentionally bound to loopback. Use the browser on the operator
-workstation; remote UI/API exposure is outside the supported run path.
+workstation; remote UI/API exposure is outside the supported run path. Device scans and
+writes also require the UI's `X-Magewell-Operator-Intent: confirmed` header, and browser
+requests from origins outside `ALLOWED_ORIGINS` are rejected before device network access.
+The header is an intent/CSRF guard, not a secret or a replacement for the write lock.
 
 CSV baseline updates accept UTF-8 `.csv` files with exactly these required columns:
 

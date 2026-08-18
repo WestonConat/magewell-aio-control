@@ -73,7 +73,9 @@ export default function HomePage() {
       const url = `${backendBaseUrl}/discover-magewell?subnet=${encodeURIComponent(
         subnetToScan,
       )}&per_ip_timeout=1.0&max_concurrent=50&rescan=${forceRescan}`;
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        headers: { "X-Magewell-Operator-Intent": "confirmed" },
+      });
       if (!response.ok) throw new Error(await apiError(response));
       const data = await response.json();
       setDevices(data.devices || []);
@@ -154,7 +156,10 @@ export default function HomePage() {
     try {
       const response = await fetch(`${backendBaseUrl}/push-updates`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Magewell-Operator-Intent": "confirmed",
+        },
         body: JSON.stringify({ devices: devicesToUpdate, confirm: true }),
       });
       if (!response.ok) throw new Error(await apiError(response));

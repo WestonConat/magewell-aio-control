@@ -11,7 +11,7 @@ from typing import Any
 
 import aiohttp
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_SUBNET = "127.0.0.1/32"
 DEFAULT_ALLOWED_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
+OPERATOR_INTENT_HEADER = "X-Magewell-Operator-Intent"
+OPERATOR_INTENT_VALUE = "confirmed"
 
 
 class DeviceSelection(BaseModel):
@@ -60,6 +62,21 @@ def get_allowed_network() -> ipaddress.IPv4Network:
 def get_allowed_origins() -> list[str]:
     raw_value = os.getenv("ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS)
     return [origin.strip().rstrip("/") for origin in raw_value.split(",") if origin.strip()]
+
+
+def require_operator_intent(intent: str | None, origin: str | None) -> None:
+    """Require an explicit browser intent signal before any device network access."""
+    if intent != OPERATOR_INTENT_VALUE:
+        raise HTTPException(status_code=403, detail="Explicit operator intent is required.")
+    if origin and origin.rstrip("/") not in get_allowed_origins():
+        raise HTTPException(status_code=403, detail="Browser origin is not allowed.")
+
+
+def safe_device_error(exc: BaseException) -> str:
+    """Return an actionable error without serializing credential-bearing request URLs."""
+    if isinstance(exc, aiohttp.ClientError | TimeoutError):
+        return "Device request failed; verify reachability, credentials, and device response."
+    return str(exc)
 
 
 def get_max_scan_hosts() -> int:
@@ -161,7 +178,7 @@ app.add_middleware(
     allow_origins=get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", OPERATOR_INTENT_HEADER],
 )
 
 
@@ -325,12 +342,13 @@ async def push_update_for_device(
         await import_settings_call(session, magewell_ip, settings, cookie_header, magewell_id)
         return {"ip": magewell_ip, "magewell_id": magewell_id, "status": "updated"}
     except Exception as exc:
-        logger.error("Update failed for %s (%s): %s", magewell_id, magewell_ip, exc)
+        error = safe_device_error(exc)
+        logger.error("Update failed for %s (%s): %s", magewell_id, magewell_ip, error)
         return {
             "ip": magewell_ip,
             "magewell_id": magewell_id,
             "status": "failed",
-            "error": str(exc),
+            "error": error,
         }
 
 
@@ -385,7 +403,10 @@ async def discover_magewell(
     per_ip_timeout: float = Query(1.0, gt=0, le=5),
     max_concurrent: int = Query(50, ge=1, le=200),
     settings_timeout: float = Query(2.0, gt=0, le=10),
+    x_magewell_operator_intent: str | None = Header(None),
+    origin: str | None = Header(None),
 ) -> dict[str, Any]:
+    require_operator_intent(x_magewell_operator_intent, origin)
     network = validate_scan_network(subnet)
     username, password = get_device_credentials()
     if not rescan and getattr(app.state, "devices", None):
@@ -416,8 +437,9 @@ async def discover_magewell(
     devices = []
     for ip, report in zip(magewell_ips, report_results):
         if isinstance(report, Exception):
-            logger.error("Could not read settings from %s: %s", ip, report)
-            devices.append({"ip": ip, "name": "", "settings": {}, "read_error": str(report)})
+            error = safe_device_error(report)
+            logger.error("Could not read settings from %s: %s", ip, error)
+            devices.append({"ip": ip, "name": "", "settings": {}, "read_error": error})
         else:
             devices.append({"ip": ip, "name": report.get("name", ""), "settings": report})
     app.state.devices = devices
@@ -445,7 +467,12 @@ async def set_control(device: DeviceSelection) -> dict[str, Any]:
 
 
 @app.post("/push-updates")
-async def push_updates(request: PushUpdateRequest) -> dict[str, Any]:
+async def push_updates(
+    request: PushUpdateRequest,
+    x_magewell_operator_intent: str | None = Header(None),
+    origin: str | None = Header(None),
+) -> dict[str, Any]:
+    require_operator_intent(x_magewell_operator_intent, origin)
     require_device_writes(request.confirm)
     username, password = get_device_credentials()
     ensure_unique_devices(request.devices)
@@ -487,7 +514,10 @@ async def push_updates(request: PushUpdateRequest) -> dict[str, Any]:
 async def bulk_update(
     file: UploadFile = File(...),
     confirm: bool = Query(False),
+    x_magewell_operator_intent: str | None = Header(None),
+    origin: str | None = Header(None),
 ) -> dict[str, Any]:
+    require_operator_intent(x_magewell_operator_intent, origin)
     require_device_writes(confirm)
     username, password = get_device_credentials()
     if not file.filename or not file.filename.lower().endswith(".csv"):
