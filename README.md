@@ -80,7 +80,9 @@ NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000 npm --prefix frontend run dev
 | `ALLOWED_SUBNET` | `127.0.0.1/32` | IPv4 CIDR. Every requested scan and write target must be inside it. |
 | `MAGEWELL_USERNAME` | empty | Required before any real device report read or write. |
 | `MAGEWELL_PASSWORD` | empty | Required before any real device report read or write; never commit it. |
-| `ENABLE_DEVICE_WRITES` | `false` | The single real-device effect boundary. Only `true` unlocks write endpoints. |
+| `MAGEWELL_OLD_PASSWORD` | empty | Temporary rotation input; inject only into the disposable backend process and never store it. |
+| `ENABLE_CREDENTIAL_ROTATION` | `false` | Separate lock for one-device-at-a-time password rotation; cannot be enabled with Camera-profile writes. |
+| `ENABLE_DEVICE_WRITES` | `false` | Camera-profile write boundary. Never enable it together with credential rotation. |
 | `MAX_SCAN_HOSTS` | `1024` | Maximum hosts in one requested scan; hard ceiling is 4096. |
 | `MAX_UPDATE_DEVICES` | `100` | Maximum unique targets in one write request; hard ceiling is 500. |
 | `ALLOWED_ORIGINS` | local UI origins | Comma-separated exact browser origins allowed by CORS. |
@@ -95,16 +97,11 @@ writes also require the UI's `X-Magewell-Operator-Intent: confirmed` header, and
 requests from origins outside `ALLOWED_ORIGINS` are rejected before device network access.
 The header is an intent/CSRF guard, not a secret or a replacement for the write lock.
 
-CSV baseline updates accept UTF-8 `.csv` files with exactly these required columns:
-
-```csv
-Magewell ID,Magewell IP
-ENCODER-01,192.0.2.10
-```
-
-See `backend/devices.example.csv`. IPs must be unique and inside `ALLOWED_SUBNET`;
-blank IDs, malformed files, duplicate IPs, and excessive row counts are rejected before
-network access.
+Embedded-baseline and CSV writes are disabled. Every supported write starts from a
+deep-copied settings payload read from an operator-selected live control device. Target-
+local identity, management-network, recording-path, and asset-inventory settings are
+preserved from each target's successful scan report. The backend rejects schema-mismatched
+targets, returns the frozen source SHA-256, and rejects the control source as a target.
 
 ## Read versus write behavior
 
@@ -112,39 +109,67 @@ network access.
 | --- | --- |
 | `GET /healthz`, `GET /local-subnet` | Local state only; no LAN access. |
 | Manual device scan | Sends read-only ping, login, and report requests inside `ALLOWED_SUBNET`. |
-| Select control source | Stores the already-read settings in backend memory; no device write. |
-| Push selected settings | Calls Magewell `import-settings` once per explicitly selected, scanned target. |
-| CSV baseline update | Calls `import-settings` once per validated CSV row using the embedded baseline. |
+| Select control source | Freezes a deep copy of the already-read live settings and returns its SHA-256; no device write. |
+| Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
+| Verify target | Performs up to three read-only report checks over a two-second settle window and compares SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write or mutation retry. |
+| Credential inventory | Authenticates each responder with the new credential first, then the old credential; no device write. |
+| Rotate one credential | Uses the authenticated admin `set-passwd` API exactly once, then verifies device identity with the new credential. |
+| CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
 credentials, an explicit UI confirmation, and a validated non-empty target set. Only one
 write batch can run at a time. The mutation call is intentionally not retried, preventing
-an ambiguous response from causing a silent second submission. The UI reports success or
-failure for every target.
+an ambiguous response from causing a silent second submission. After an accepted write,
+the UI locks target changes and further writes until the operator runs its read-only
+verification. Verification stops on the first mismatch or read error and reports each
+device's expected and actual fingerprint.
+
+Credential rotation has a separate `ENABLE_CREDENTIAL_ROTATION` lock and accepts exactly
+one target per request. A fresh mixed-credential inventory classifies devices as `old`,
+`new`, or `error`. An already-rotated device is verified without another mutation. An
+ambiguous password-change response blocks any retry until a fresh inventory determines
+which credential works. Camera-profile writes must remain locked throughout rotation.
+
+For a supervised rotation, put the desired final password in `MAGEWELL_PASSWORD`, inject
+the old password only as the disposable process environment variable
+`MAGEWELL_OLD_PASSWORD`, set `ENABLE_CREDENTIAL_ROTATION=true`, and keep
+`ENABLE_DEVICE_WRITES=false`. Run `GET /credential-rotation-inventory` for the exact
+approved subnet and require every responder to report `old` or `new`. Submit one explicit
+`POST /rotate-credential` target with `confirm: true`; proceed only after
+`rotated-and-verified`. Rotate subsequent `old` devices one at a time. Finish with a fresh
+inventory in which every device reports `new`, then remove the container. Never retry a
+device whose credential state is unknown without first running a fresh inventory.
 
 ## Controlled live-run checklist
 
-Complete this checklist during the maintenance window:
+Complete this checklist during a supervised bench session:
 
 1. Rotate the previously exposed device credentials and put the new values only in
    the untracked `.env`.
 2. Confirm Docker Desktop is running and the workstation is attached only to the intended
    control network.
-3. Set the smallest correct `ALLOWED_SUBNET`; verify the intended device IPs and CSV rows
-   are inside it.
+3. Set the exact approved `ALLOWED_SUBNET`; do not widen or substitute discovery targets.
 4. Keep `ENABLE_DEVICE_WRITES=false`; run `just check`,
    `docker compose config --quiet`, and `docker compose up --build -d`.
 5. Check `curl --fail --silent http://127.0.0.1:8000/healthz`. Confirm the subnet,
    `device_reads_configured: true`, and `device_writes_enabled: false`.
-6. Open the UI and manually scan. Reconcile the discovered names/IPs against the run sheet.
-   Stop if any unexpected device or read error appears.
+6. Open the UI and manually scan. Treat the successful live discovery as the inventory;
+   stop on any identity mismatch, authentication problem, or read error.
 7. Stop the stack, set `ENABLE_DEVICE_WRITES=true`, and recreate it with
    `docker compose up --build -d --force-recreate`. Verify health now reports writes enabled.
-8. Rescan, select the known-good control source, and select exactly one staged test target.
-9. Review the confirmation count, submit once, and wait for that target's result. Do not
-   proceed on an error or unknown response.
-10. Verify the staged target directly in the Magewell UI. Only then repeat with the next
-    small, explicitly reviewed target set.
+8. Rescan, explicitly select the known-good live control source, record its settings
+   SHA-256, and select exactly one staged non-source target.
+9. Review the displayed source-to-target mapping, submit once, and wait for that target's
+   result. Do not proceed on an error or unknown response.
+10. Click **Verify Selected Targets (read only)** and confirm every result is `VERIFIED`
+    with matching expected and actual SHA-256 values. The app stops verification on the
+    first mismatch or read error and keeps the next write locked. Verify the target
+    identity, network reachability, and Camera profile directly in the Magewell UI as an
+    independent check.
+    Only then repeat with the next explicitly reviewed target set. Use **Select all
+    targets** for the confirmed remainder or select cards individually; the frozen source
+    is always excluded, and **Clear all** resets the batch. Keep each batch within
+    `MAX_UPDATE_DEVICES`; never raise the cap silently.
 11. At the end, set `ENABLE_DEVICE_WRITES=false`, run
     `docker compose up -d --force-recreate backend`, verify health reports writes locked,
     and run `docker compose down`.
