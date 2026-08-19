@@ -57,5 +57,6 @@ def name_matches_fleet_id(name: str, fleet_id: str) -> bool:
 
 
 def current_name_matches_fleet_id(name: str, fleet_id: str) -> bool:
-    """Accept legacy separators while checking the current two-digit fleet suffix."""
-    return name.endswith(fleet_number(fleet_id))
+    """Recognize the authoritative AIO-NN token in a legacy device name."""
+    token = re.escape(fleet_id)
+    return re.search(rf"(?<![A-Za-z0-9]){token}(?!\d)", name, flags=re.IGNORECASE) is not None

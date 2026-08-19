@@ -22,6 +22,7 @@ from backend.app import (
     validate_scan_network,
 )
 from backend.naming import build_rename_settings
+from backend.fleet_journal import current_name_matches_fleet_id
 from backend.settings_merge import get_bulk_update_settings
 
 os.environ.setdefault("ALLOWED_SUBNET", "192.0.2.0/24")
@@ -30,6 +31,20 @@ os.environ.setdefault("ENABLE_DEVICE_WRITES", "false")
 
 client = TestClient(app)
 OPERATOR_HEADERS = {"X-Magewell-Operator-Intent": OPERATOR_INTENT_VALUE}
+
+
+@pytest.mark.parametrize(
+    ("name", "fleet_id"),
+    [
+        ("AIO-16-Oceanside C", "AIO-16"),
+        ("FOUR_SEASONS_CISO_AIO-07", "AIO-07"),
+        ("BH-KN3-AIO-30", "AIO-30"),
+        ("aio-02-pulse-room-110", "AIO-02"),
+    ],
+)
+def test_current_name_recognizes_authoritative_fleet_token(name: str, fleet_id: str) -> None:
+    assert current_name_matches_fleet_id(name, fleet_id)
+    assert not current_name_matches_fleet_id(name, "AIO-31")
 
 
 def test_health_reports_safe_write_boundary() -> None:
