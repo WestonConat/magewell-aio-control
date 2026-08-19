@@ -296,9 +296,10 @@ def public_device_list(devices: list[dict[str, Any]]) -> list[dict[str, str]]:
             public_device["serial"] = identity["serial"]
             public_device["eth_mac"] = identity["eth_mac"]
             public_device["fleet_id"] = identity.get("fleet_id", "")
-            public_device["name_journal_mismatch"] = not current_name_matches_fleet_id(
-                device.get("name", ""), identity["fleet_id"]
-            )
+            if identity.get("fleet_id"):
+                public_device["name_journal_mismatch"] = not current_name_matches_fleet_id(
+                    device.get("name", ""), identity["fleet_id"]
+                )
         if device.get("identity_error"):
             public_device["identity_error"] = device["identity_error"]
         public_devices.append(public_device)
@@ -474,9 +475,11 @@ async def get_device_identity_with_login(
     if not isinstance(serial, str) or not serial.strip() or not isinstance(eth_mac, str):
         raise RuntimeError("Device identity response is missing serial or Ethernet MAC.")
     fleet_id = find_fleet_id(serial, eth_mac)
-    if not fleet_id:
-        raise RuntimeError("Device serial/MAC pair is not present in the fleet journal.")
-    return {"serial": serial.strip(), "eth_mac": eth_mac.lower(), "fleet_id": fleet_id}
+    return {
+        "serial": serial.strip(),
+        "eth_mac": eth_mac.lower(),
+        "fleet_id": fleet_id or "",
+    }
 
 
 async def identify_rotation_device(
@@ -665,6 +668,10 @@ async def discover_magewell(
                 device["identity_error"] = safe_device_error(identity)
             else:
                 device["identity"] = identity
+                if not identity["fleet_id"]:
+                    device["identity_error"] = (
+                        "Device serial/MAC pair is not present in the fleet journal."
+                    )
             devices.append(device)
     app.state.devices = devices
     return {"devices": public_device_list(devices), "cached": False}

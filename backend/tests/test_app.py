@@ -465,6 +465,33 @@ def test_device_settings_are_not_returned_to_the_browser() -> None:
     ) == [{"ip": "192.0.2.10", "name": "ENCODER-01"}]
 
 
+def test_unmatched_journal_identity_is_visible_without_settings() -> None:
+    assert public_device_list(
+        [
+            {
+                "ip": "192.0.2.10",
+                "name": "ENCODER-01",
+                "settings": {"wifi": [{"passwd": "secret"}]},
+                "identity": {
+                    "serial": "B313230202253",
+                    "eth_mac": "d0:c8:57:81:58:86",
+                    "fleet_id": "",
+                },
+                "identity_error": "Device serial/MAC pair is not present in the fleet journal.",
+            }
+        ]
+    ) == [
+        {
+            "ip": "192.0.2.10",
+            "name": "ENCODER-01",
+            "serial": "B313230202253",
+            "eth_mac": "d0:c8:57:81:58:86",
+            "fleet_id": "",
+            "identity_error": "Device serial/MAC pair is not present in the fleet journal.",
+        }
+    ]
+
+
 def test_loopback_default_is_a_valid_single_host(monkeypatch) -> None:
     monkeypatch.setenv("ALLOWED_SUBNET", "127.0.0.1/32")
     assert str(validate_scan_network("127.0.0.1/32")) == "127.0.0.1/32"

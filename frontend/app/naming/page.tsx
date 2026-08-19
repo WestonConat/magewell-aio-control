@@ -369,6 +369,9 @@ export default function NamingPage() {
                   <small>
                     {device.ip}
                     {device.identity_error ? ` · ${device.identity_error}` : ""}
+                    {device.identity_error && device.serial && device.eth_mac
+                      ? ` · ${device.serial} / ${device.eth_mac}`
+                      : ""}
                   </small>
                 </label>
               ))}
