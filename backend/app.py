@@ -255,6 +255,19 @@ def require_device_writes(confirm: bool) -> None:
         raise HTTPException(status_code=400, detail="Explicit write confirmation is required.")
 
 
+def require_rename_confirmation(confirm: bool) -> None:
+    """Allow a reviewed naming plan without treating a dev flag as operator authority."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Explicit rename confirmation is required.")
+    conflicting_modes = enabled_effect_modes() & {"credential-rotation", "firmware-update"}
+    if conflicting_modes:
+        labels = ", ".join(EFFECT_MODE_LABELS[mode] for mode in sorted(conflicting_modes))
+        raise HTTPException(
+            status_code=409,
+            detail=f"Naming cannot run while {labels} are armed.",
+        )
+
+
 def require_credential_rotation(confirm: bool) -> None:
     require_effect_mode("credential-rotation")
     if not confirm:
@@ -892,7 +905,7 @@ async def rename_execute(
     origin: str | None = Header(None),
 ) -> dict[str, Any]:
     require_operator_intent(x_magewell_operator_intent, origin)
-    require_device_writes(request.confirm)
+    require_rename_confirmation(request.confirm)
     plan = getattr(app.state, "rename_plans", {}).get(request.plan_id)
     if not plan:
         raise HTTPException(

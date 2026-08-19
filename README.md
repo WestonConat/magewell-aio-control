@@ -6,9 +6,9 @@ settings to explicitly selected targets, and planning guarded bulk device naming
 intended for a supervised local-network maintenance window, not as an unattended fleet
 service.
 
-The application is safe by default: it uses a loopback-only subnet, never scans on page
-load, and rejects every device-write request unless the operator explicitly enables the
-write boundary and confirms the target set.
+The application is safe by default: it uses a loopback-only subnet and never scans on page
+load. Profile writes require the device-write boundary; Naming uses a reviewed, identity-bound
+plan plus the operator's explicit in-app confirmation.
 
 ## Prerequisites
 
@@ -84,7 +84,7 @@ NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000 npm --prefix frontend run dev
 | `MAGEWELL_PASSWORD` | empty | Required before any real device report read or write; never commit it. |
 | `MAGEWELL_OLD_PASSWORD` | empty | Temporary rotation input; inject only into the disposable backend process and never store it. |
 | `ENABLE_CREDENTIAL_ROTATION` | `false` | Separate lock for one-device-at-a-time password rotation; cannot be enabled with Camera-profile writes. |
-| `ENABLE_DEVICE_WRITES` | `false` | Device configuration write boundary, including profiles and naming. Never enable it together with credential rotation. |
+| `ENABLE_DEVICE_WRITES` | `false` | Device configuration write boundary for profile settings. Never enable it together with credential rotation. Naming is authorized by its reviewed plan and explicit in-app confirmation. |
 | `ENABLE_FIRMWARE_UPDATES` | `false` | Single-device firmware boundary. Camera-profile writes and credential rotation must remain locked. |
 | `MAX_SCAN_HOSTS` | `1024` | Maximum hosts in one requested scan; hard ceiling is 4096. |
 | `MAX_UPDATE_DEVICES` | `100` | Maximum unique targets in one write request; hard ceiling is 500. |
@@ -123,13 +123,13 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Naming plan | Builds a reviewed rename plan from the latest successful scan; no device write. |
 | Rename batch | Reads and identity-checks each target, submits the authenticated Magewell `set-name` call exactly once, and immediately verifies the display name plus unchanged recorder state. Only then, if supported recorder-name fields need changes, it submits one `import-settings` call to reset them (`dir-name` becomes `NAME_REC`; `prefix-name` becomes `NAME_`) and reads back the full expected settings. These are two non-atomic device calls; a stop reports the verified versus uncertain stage and submits no later target. |
 
-Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
-credentials, an explicit UI confirmation, and a validated non-empty target set. Only one
-write batch can run at a time. The mutation call is intentionally not retried, preventing
-an ambiguous response from causing a silent second submission. After an accepted write,
-the UI locks target changes and further writes until the operator runs its read-only
-verification. Verification stops on the first mismatch or read error and reports each
-device's expected and actual fingerprint.
+Profile writes require `ENABLE_DEVICE_WRITES=true`, valid runtime credentials, an explicit UI
+confirmation, and a validated non-empty target set. Naming instead requires valid runtime
+credentials, a fresh reviewed identity-bound plan, and explicit in-app confirmation; it does
+not require restarting the backend to set a development write flag. Only one mutation batch can
+run at a time. The mutation call is intentionally not retried, preventing an ambiguous response
+from causing a silent second submission. Naming refuses to run while firmware updates or
+credential rotation are armed.
 
 ## Naming devices
 
@@ -147,7 +147,7 @@ The plan rejects duplicate targets or new names, a CSV name whose suffix does no
 device's journaled ID, collisions with devices not in the plan, failed scan reports,
 unrecognized serial/MAC pairs, out-of-subnet targets, and plans above `MAX_UPDATE_DEVICES`.
 Review every IP/current-name/new-name pair and recording-value count. The write button
-remains disabled until `ENABLE_DEVICE_WRITES=true` has been loaded by recreating the backend.
+is available when the plan is ready; the operator's confirmation is the authorization to submit it.
 New names must use [Magewell's exact `set-name` contract](https://magewell.com/api-docs/ultra-encode-api/general/set-name.html):
 1–32 characters, only letters, numbers, spaces, and `._-+'[](),`, with no leading or trailing
 space. On confirmation the backend re-reads every target, checks its serial/MAC identity and

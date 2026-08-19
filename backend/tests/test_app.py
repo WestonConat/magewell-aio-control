@@ -376,14 +376,25 @@ def test_rename_plan_uses_journal_ids_and_rejects_name_collisions() -> None:
     assert "collides" in collision.json()["detail"]
 
 
-def test_rename_execute_is_locked_before_device_network_access() -> None:
+def test_rename_execute_requires_operator_confirmation_before_device_network_access() -> None:
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": "does-not-matter", "confirm": False},
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Explicit rename confirmation is required."
+
+
+def test_rename_execute_rejects_conflicting_armed_effect_modes(monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_FIRMWARE_UPDATES", "true")
     response = client.post(
         "/rename-execute",
         json={"plan_id": "does-not-matter", "confirm": True},
         headers=OPERATOR_HEADERS,
     )
-    assert response.status_code == 403
-    assert "Device writes are locked" in response.json()["detail"]
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Naming cannot run while Firmware updates are armed."
 
 
 def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch) -> None:
@@ -460,7 +471,7 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
         assert payload == after[ip]
         return {"result": 0}
 
-    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "false")
     monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
     monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
     monkeypatch.setattr(app_module, "get_device_report_with_login", report)
@@ -561,7 +572,7 @@ def test_rename_execute_stops_after_recording_submission_and_marks_remaining_uns
         mutations.append(f"import-settings:{ip}")
         raise TimeoutError("ambiguous import response")
 
-    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "false")
     monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
     monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
     monkeypatch.setattr(app_module, "get_device_report_with_login", report)

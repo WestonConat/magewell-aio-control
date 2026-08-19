@@ -137,7 +137,6 @@ export default function NamingPage() {
   const [run, setRun] = useState<RenameRun | null>(null);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  const [writesEnabled, setWritesEnabled] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -149,9 +148,6 @@ export default function NamingPage() {
         if (!subnetResponse.ok || !healthResponse.ok)
           throw new Error("Backend is unavailable.");
         setSubnet((await subnetResponse.json()).local_subnet || "");
-        setWritesEnabled(
-          Boolean((await healthResponse.json()).device_writes_enabled),
-        );
       } catch (error) {
         setMessage(
           error instanceof Error ? error.message : "Backend is unavailable.",
@@ -243,7 +239,7 @@ export default function NamingPage() {
   };
 
   const execute = async () => {
-    if (!plan || !writesEnabled) return;
+    if (!plan) return;
     if (
       !window.confirm(
         `Rename exactly ${plan.targets.length} device(s), update their matching recording values, and verify each device before proceeding?`,
@@ -286,10 +282,8 @@ export default function NamingPage() {
     <main className={styles.main}>
       <div className={styles.topBar}>
         <h1>Naming</h1>
-        <span
-          className={`${styles.writeStatus} ${writesEnabled ? styles.statusArmed : styles.statusLocked}`}
-        >
-          {writesEnabled ? "WRITES ARMED" : "WRITES LOCKED"}
+        <span className={`${styles.writeStatus} ${styles.statusArmed}`}>
+          OPERATOR CONFIRMS
         </span>
       </div>
       <form className={styles.scanPanel} onSubmit={scan}>
@@ -463,10 +457,10 @@ export default function NamingPage() {
             <button
               type="button"
               className={styles.primaryButton}
-              disabled={loading || !writesEnabled}
+              disabled={loading}
               onClick={execute}
             >
-              {writesEnabled ? "Confirm and rename" : "Writes locked"}
+              Confirm and rename
             </button>
           </div>
           <div className={styles.renameRows}>
