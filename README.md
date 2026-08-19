@@ -220,6 +220,22 @@ identity/version differs, or recovery is uncertain, do not retry. Relock firmwar
 recover that one device through the manufacturer UI or Magewell support before continuing.
 Firmware downgrade is not an assumed recovery path.
 
+If an older firmware update preserves identity/version but resets only
+`rec-channels.0.is-use` from the receipt's `1` to `0`, the guarded recovery command can restore
+that single value. It refuses any other unexpected drift, creates a durable no-retry receipt,
+submits the current settings with only that value repaired, and verifies the full settings
+snapshot before fleet progression:
+
+```bash
+docker compose exec -T backend python -m backend.firmware_cli restore-recording-one \
+  --ip 192.0.2.10 \
+  --expected-name ENCODER-01 \
+  --expected-serial SERIAL_FROM_PREFLIGHT \
+  --expected-eth-mac MAC_FROM_PREFLIGHT \
+  --target-version 2.4.288 \
+  --confirm
+```
+
 ## Controlled live-run checklist
 
 Complete this checklist during a supervised bench session:

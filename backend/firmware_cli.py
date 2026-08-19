@@ -4,7 +4,13 @@ import json
 from pathlib import Path
 
 from .app import safe_device_error
-from .firmware import FirmwareSafetyError, preflight_one, update_one, verify_one
+from .firmware import (
+    FirmwareSafetyError,
+    preflight_one,
+    restore_recording_channel_one,
+    update_one,
+    verify_one,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,6 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--expected-serial", required=True)
     verify_parser.add_argument("--expected-eth-mac", required=True)
     verify_parser.add_argument("--target-version", required=True)
+
+    recovery_parser = subparsers.add_parser("restore-recording-one")
+    recovery_parser.add_argument("--ip", required=True)
+    recovery_parser.add_argument("--expected-name", required=True)
+    recovery_parser.add_argument("--expected-serial", required=True)
+    recovery_parser.add_argument("--expected-eth-mac", required=True)
+    recovery_parser.add_argument("--target-version", required=True)
+    recovery_parser.add_argument("--confirm", action="store_true")
     return parser
 
 
@@ -47,6 +61,15 @@ async def run() -> dict:
             args.expected_serial,
             args.expected_eth_mac,
             args.target_version,
+        )
+    if args.command == "restore-recording-one":
+        return await restore_recording_channel_one(
+            args.ip,
+            args.expected_name,
+            args.expected_serial,
+            args.expected_eth_mac,
+            args.target_version,
+            confirm=args.confirm,
         )
     return await update_one(
         args.ip,

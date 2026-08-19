@@ -20,6 +20,7 @@ from .app import (
     get_allowed_network,
     get_device_credentials,
     get_device_report_with_login,
+    import_settings_call,
     login_device,
     md5_hash,
     settings_fingerprint,
@@ -796,6 +797,49 @@ def settings_preservation_report(before: dict[str, Any], after: dict[str, Any]) 
                     accepted_additions,
                 )
 
+    before_schedulers = normalized_before.get("schedulers")
+    after_schedulers = normalized_after.get("schedulers")
+    scheduler_defaults = {
+        "panopto-folder-id": "",
+        "source": 0,
+        "uid": "",
+        "utc-dateline": 0,
+        "utc-time-begin": 0,
+        "utc-time-end": 0,
+    }
+    if isinstance(before_schedulers, list) and isinstance(after_schedulers, list):
+        for scheduler_index, (before_scheduler, after_scheduler) in enumerate(
+            zip(before_schedulers, after_schedulers)
+        ):
+            if not isinstance(before_scheduler, dict) or not isinstance(after_scheduler, dict):
+                continue
+            _remove_expected_addition(
+                before_scheduler,
+                after_scheduler,
+                "import-type",
+                0,
+                f"schedulers.{scheduler_index}.import-type",
+                accepted_additions,
+            )
+            before_channels = before_scheduler.get("channels")
+            after_channels = after_scheduler.get("channels")
+            if not isinstance(before_channels, list) or not isinstance(after_channels, list):
+                continue
+            for channel_index, (before_channel, after_channel) in enumerate(
+                zip(before_channels, after_channels)
+            ):
+                if not isinstance(before_channel, dict) or not isinstance(after_channel, dict):
+                    continue
+                for key, expected_value in scheduler_defaults.items():
+                    _remove_expected_addition(
+                        before_channel,
+                        after_channel,
+                        key,
+                        expected_value,
+                        f"schedulers.{scheduler_index}.channels.{channel_index}.{key}",
+                        accepted_additions,
+                    )
+
     unexpected_change_paths = _difference_paths(normalized_before, normalized_after)
     return {
         "preserved": not unexpected_change_paths,
@@ -925,6 +969,191 @@ async def verify_one(
         "background_status_bits": background_status_bits,
         "settings_changes": settings_changes,
         "preservation": preservation,
+        "recovery_state": str(run_dir),
+    }
+
+
+async def restore_recording_channel_one(
+    ip: str,
+    expected_name: str,
+    expected_serial: str,
+    expected_eth_mac: str,
+    target_version: str,
+    *,
+    confirm: bool,
+    recovery_root: Path | None = None,
+) -> dict[str, Any]:
+    """Restore one firmware-reset recording enable flag from the durable backup."""
+    require_firmware_effects(confirm)
+    normalized_ip = validate_target_ip(ip)
+    manifest = approved_manifest(target_version)
+    run_dir = (
+        (recovery_root or get_recovery_root())
+        / _safe_identity_component(expected_serial.strip())
+        / manifest.sha256
+    )
+    backup_path = run_dir / "pre-firmware-settings.json"
+    effect_lock_path = run_dir / "effect.lock"
+    state_path = run_dir / "firmware-state.json"
+    if not backup_path.is_file() or not effect_lock_path.is_file() or not state_path.is_file():
+        raise FirmwareSafetyError("The durable firmware recovery receipt is incomplete.")
+    try:
+        backup_payload = json.loads(backup_path.read_text(encoding="utf-8"))
+        effect_lock = json.loads(effect_lock_path.read_text(encoding="utf-8"))
+        effect_state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise FirmwareSafetyError("The durable firmware recovery receipt is unreadable.") from exc
+    expected_receipt = {
+        "ip": normalized_ip,
+        "name": expected_name,
+        "serial": expected_serial.strip(),
+        "eth_mac": expected_eth_mac.strip().lower(),
+        "artifact_sha256": manifest.sha256,
+    }
+    if any(effect_lock.get(key) != value for key, value in expected_receipt.items()):
+        raise FirmwareSafetyError("The recovery receipt does not match the approved target.")
+    if effect_state.get("state") not in {
+        "firmware-verified-settings-changed",
+        "recovery-verified-settings-changed",
+    }:
+        raise FirmwareSafetyError("The receipt does not record a settings-verification stop.")
+    before_settings = backup_payload.get("settings")
+    if not isinstance(before_settings, dict):
+        raise FirmwareSafetyError("The recovery backup contains no valid settings snapshot.")
+    try:
+        backed_up_value = before_settings["rec-channels"][0]["is-use"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise FirmwareSafetyError(
+            "The recovery backup has no recording-channel enable flag."
+        ) from exc
+    if backed_up_value != 1:
+        raise FirmwareSafetyError(
+            "The backed-up recording-channel value is not the approved value 1."
+        )
+
+    username, password = get_device_credentials()
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0)) as session:
+        cookie_header = await login_device(
+            session,
+            normalized_ip,
+            username,
+            md5_hash(password),
+            expected_name,
+        )
+        info = await get_device_info(session, normalized_ip, cookie_header)
+        observed = validate_device_info(info, target_version)
+        assert_operator_approved_identity(observed, expected_serial, expected_eth_mac)
+        if not observed["already_current"]:
+            raise FirmwareSafetyError("Recording recovery requires the verified target firmware.")
+        current_settings = await get_device_report_with_login(
+            session, normalized_ip, username, password, timeout=20.0
+        )
+        if current_settings.get("name") != expected_name:
+            raise FirmwareSafetyError("Recording recovery found a display-name mismatch.")
+        status = await get_device_status(session, normalized_ip, cookie_header)
+        background_status_bits = assert_idle_status(status, post_update=True)
+        preservation = settings_preservation_report(before_settings, current_settings)
+        if preservation["unexpected_change_paths"] != ["rec-channels.0.is-use"]:
+            raise FirmwareSafetyError(
+                "Recording recovery found drift beyond the single approved enable flag."
+            )
+        try:
+            current_value = current_settings["rec-channels"][0]["is-use"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise FirmwareSafetyError(
+                "The current recording-channel enable flag is missing."
+            ) from exc
+        if current_value != 0:
+            raise FirmwareSafetyError(
+                "The current recording-channel value is not the stopped value 0."
+            )
+
+        repair_lock = run_dir / "recording-recovery.lock"
+        try:
+            _write_json_exclusive(
+                repair_lock,
+                {
+                    "state": "locked",
+                    **expected_receipt,
+                    "path": "rec-channels.0.is-use",
+                    "before": current_value,
+                    "restore": backed_up_value,
+                    "current_settings_sha256": settings_fingerprint(current_settings),
+                },
+            )
+        except FileExistsError as exc:
+            raise FirmwareSafetyError(
+                "A durable recording-recovery receipt already exists; do not submit again."
+            ) from exc
+
+        final_settings = await get_device_report_with_login(
+            session, normalized_ip, username, password, timeout=20.0
+        )
+        if settings_fingerprint(final_settings) != settings_fingerprint(current_settings):
+            record_effect_state(run_dir, "recording-recovery-prewrite-settings-changed")
+            raise FirmwareSafetyError("Device settings changed before recording recovery.")
+        repaired_settings = copy.deepcopy(final_settings)
+        repaired_settings["rec-channels"][0]["is-use"] = backed_up_value
+        record_effect_state(run_dir, "recording-recovery-starting")
+        try:
+            device_response = await import_settings_call(
+                session,
+                normalized_ip,
+                repaired_settings,
+                cookie_header,
+                expected_name,
+            )
+        except Exception as exc:
+            record_effect_state(
+                run_dir,
+                "recording-recovery-response-unknown",
+                message=type(exc).__name__,
+            )
+            raise FirmwareSafetyError(
+                "Recording recovery response is unknown; do not retry before read-only verification."
+            ) from exc
+
+        verified_settings: dict[str, Any] = {}
+        for verification_attempt in range(1, 4):
+            verified_settings = await get_device_report_with_login(
+                session, normalized_ip, username, password, timeout=20.0
+            )
+            if settings_preservation_report(before_settings, verified_settings)["preserved"]:
+                break
+            if verification_attempt < 3:
+                await asyncio.sleep(1)
+        verified_info = await get_device_info(session, normalized_ip, cookie_header)
+        verified_observed = validate_device_info(verified_info, target_version)
+        assert_operator_approved_identity(verified_observed, expected_serial, expected_eth_mac)
+        if verified_settings.get("name") != expected_name:
+            raise FirmwareSafetyError("Recording recovery found a post-write name mismatch.")
+        verified_status = await get_device_status(session, normalized_ip, cookie_header)
+        verified_background_bits = assert_idle_status(verified_status, post_update=True)
+
+    verified_preservation = settings_preservation_report(before_settings, verified_settings)
+    if not verified_preservation["preserved"]:
+        record_effect_state(
+            run_dir,
+            "recording-recovery-verification-failed",
+            preservation=verified_preservation,
+        )
+        raise FirmwareSafetyError("Recording recovery did not restore settings preservation.")
+    record_effect_state(
+        run_dir,
+        "recording-recovery-verified",
+        settings_sha256=settings_fingerprint(verified_settings),
+        preservation=verified_preservation,
+    )
+    return {
+        "status": "recording-recovery-verified",
+        "ip": normalized_ip,
+        "name": expected_name,
+        **verified_observed,
+        "restored_path": "rec-channels.0.is-use",
+        "restored_value": backed_up_value,
+        "device_response": device_response,
+        "background_status_bits": max(background_status_bits, verified_background_bits),
+        "preservation": verified_preservation,
         "recovery_state": str(run_dir),
     }
 

@@ -21,6 +21,7 @@ from backend.firmware import (
     assert_idle_status,
     open_validated_artifact,
     require_firmware_effects,
+    restore_recording_channel_one,
     settings_preservation_report,
     update_one,
     validate_artifact,
@@ -445,6 +446,30 @@ def test_settings_preservation_accepts_only_observed_firmware_defaults_and_trans
     assert changed["unexpected_change_paths"] == ["profile"]
 
 
+def test_settings_preservation_accepts_observed_scheduler_defaults() -> None:
+    before = {
+        "name": "ENCODER-01",
+        "schedulers": [{"channels": [{"id": 0}]}],
+    }
+    after = copy.deepcopy(before)
+    after["schedulers"][0]["import-type"] = 0
+    after["schedulers"][0]["channels"][0].update(
+        {
+            "panopto-folder-id": "",
+            "source": 0,
+            "uid": "",
+            "utc-dateline": 0,
+            "utc-time-begin": 0,
+            "utc-time-end": 0,
+        }
+    )
+    report = settings_preservation_report(before, after)
+    assert report["preserved"] is True
+    assert report["unexpected_change_paths"] == []
+    assert "schedulers.0.import-type" in report["accepted_firmware_additions"]
+    assert "schedulers.0.channels.0.source" in report["accepted_firmware_additions"]
+
+
 def test_recovery_backup_is_private_durable_and_never_overwritten(tmp_path) -> None:
     run_dir = tmp_path / "recovery" / "serial" / "hash"
     backup = write_recovery_backup(
@@ -799,4 +824,88 @@ def test_recovery_verification_is_read_only_and_accepts_known_post_update_shape(
     assert result["preservation"]["preserved"] is True
     assert json.loads((run_dir / "firmware-state.json").read_text())["state"] == (
         "recovery-verified"
+    )
+
+
+def test_recording_recovery_restores_only_receipt_bound_enable_flag(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("ALLOWED_SUBNET", "192.0.2.0/24")
+    arm_only_firmware(monkeypatch)
+    artifact_path = tmp_path / ARTIFACT_FILENAME
+    digest = install_test_manifest(monkeypatch, artifact_path, b"artifact")
+    before = {
+        "name": "ENCODER-01",
+        "profile": "camera",
+        "rec-channels": [{"id": 0, "is-use": 1}],
+        "schedulers": [{"channels": [{"id": 0}]}],
+    }
+    current = copy.deepcopy(before)
+    current["rec-channels"][0]["is-use"] = 0
+    current["schedulers"][0]["import-type"] = 0
+    current["schedulers"][0]["channels"][0].update(
+        {
+            "panopto-folder-id": "",
+            "source": 0,
+            "uid": "",
+            "utc-dateline": 0,
+            "utc-time-begin": 0,
+            "utc-time-end": 0,
+        }
+    )
+    run_dir = acquire_effect_state(tmp_path / "recovery", valid_preflight(), {"sha256": digest})
+    write_recovery_backup(
+        run_dir,
+        "192.0.2.10",
+        "ENCODER-01",
+        before,
+        valid_preflight(),
+    )
+    firmware.record_effect_state(run_dir, "recovery-verified-settings-changed")
+    calls = {"import": 0}
+
+    async def fake_login(*args, **kwargs):
+        return "sid=test"
+
+    async def fake_info(*args, **kwargs):
+        return valid_info(TARGET_VERSION)
+
+    async def fake_report(*args, **kwargs):
+        return copy.deepcopy(current)
+
+    async def fake_status(*args, **kwargs):
+        status = valid_status()
+        status["cur-status"] = 0x400000
+        return status
+
+    async def fake_import(*args, **kwargs):
+        calls["import"] += 1
+        submitted = args[2]
+        assert submitted["rec-channels"][0]["is-use"] == 1
+        current["rec-channels"][0]["is-use"] = 1
+        return {"result": 0}
+
+    monkeypatch.setattr(firmware.aiohttp, "ClientSession", FakeClientSession)
+    monkeypatch.setattr(firmware, "login_device", fake_login)
+    monkeypatch.setattr(firmware, "get_device_credentials", lambda: ("Admin", "password"))
+    monkeypatch.setattr(firmware, "get_device_info", fake_info)
+    monkeypatch.setattr(firmware, "get_device_report_with_login", fake_report)
+    monkeypatch.setattr(firmware, "get_device_status", fake_status)
+    monkeypatch.setattr(firmware, "import_settings_call", fake_import)
+
+    result = asyncio.run(
+        restore_recording_channel_one(
+            "192.0.2.10",
+            "ENCODER-01",
+            "A305200908002",
+            "d0:c8:57:80:3a:70",
+            TARGET_VERSION,
+            confirm=True,
+            recovery_root=tmp_path / "recovery",
+        )
+    )
+    assert result["status"] == "recording-recovery-verified"
+    assert result["restored_value"] == 1
+    assert calls["import"] == 1
+    assert (run_dir / "recording-recovery.lock").is_file()
+    assert json.loads((run_dir / "firmware-state.json").read_text())["state"] == (
+        "recording-recovery-verified"
     )
