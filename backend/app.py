@@ -59,7 +59,7 @@ class CredentialRotationRequest(BaseModel):
 class RenameMapping(BaseModel):
     ip: str | None = None
     current_name: str | None = None
-    new_name: str = Field(min_length=1, max_length=128)
+    new_name: str = Field(min_length=1, max_length=32)
 
 
 class RenamePlanRequest(BaseModel):
@@ -401,6 +401,29 @@ async def import_settings_call(
         return result
 
 
+async def set_name_call(
+    session: aiohttp.ClientSession,
+    magewell_ip: str,
+    new_name: str,
+    cookie_header: str,
+    magewell_id: str,
+) -> dict[str, Any]:
+    """Submit exactly one display-name mutation; this call is intentionally not retried."""
+    validated_name = validate_new_name(new_name)
+    url = f"http://{magewell_ip}/usapi"
+    async with session.get(
+        url,
+        params={"method": "set-name", "name": validated_name},
+        headers={"Cookie": cookie_header},
+    ) as response:
+        response.raise_for_status()
+        result = await response.json()
+    if result.get("result") not in (0, "0"):
+        raise RuntimeError(f"Device rejected name change with result {result.get('result')!r}")
+    logger.info("Display name updated for device %s", magewell_id)
+    return result
+
+
 async def get_device_report_with_login(
     session: aiohttp.ClientSession,
     magewell_ip: str,
@@ -674,11 +697,17 @@ async def discover_magewell(
                     )
             devices.append(device)
     app.state.devices = devices
+    app.state.rename_scan_required = False
     return {"devices": public_device_list(devices), "cached": False}
 
 
 def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
     """Build a frozen, target-local rename plan from the latest successful scan."""
+    if getattr(app.state, "rename_scan_required", False):
+        raise HTTPException(
+            status_code=409,
+            detail="A rename run stopped. Run a fresh device scan before building another plan.",
+        )
     cached_devices = {
         item["ip"]: item
         for item in getattr(app.state, "devices", [])
@@ -799,6 +828,7 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
                 "current_name": current_name,
                 "new_name": new_name,
                 "before_settings_sha256": settings_fingerprint(settings),
+                "after_display_name_sha256": settings_fingerprint({**settings, "name": new_name}),
                 "after_settings_sha256": settings_fingerprint(payload),
                 "recording_changes": recording_changes,
                 "payload": payload,
@@ -835,6 +865,7 @@ def public_rename_plan(plan: dict[str, Any]) -> dict[str, Any]:
                     "current_name",
                     "new_name",
                     "before_settings_sha256",
+                    "after_display_name_sha256",
                     "after_settings_sha256",
                     "recording_changes",
                 )
@@ -883,6 +914,7 @@ async def rename_execute(
         raise HTTPException(status_code=409, detail="Another device mutation is already running.")
 
     results: list[dict[str, Any]] = []
+    submitted_ips: set[str] = set()
     plan["executed"] = True
     async with lock:
         connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
@@ -909,8 +941,24 @@ async def rename_execute(
                     cookie_header = await login_device(
                         session, ip, username, md5_hash(password), entry["current_name"]
                     )
-                    await import_settings_call(
-                        session, ip, entry["payload"], cookie_header, entry["current_name"]
+                except Exception as exc:
+                    results.append(
+                        {
+                            "ip": ip,
+                            "current_name": entry["current_name"],
+                            "new_name": entry["new_name"],
+                            "status": "stopped-before-submission",
+                            "display_name_status": "not-submitted",
+                            "recording_names_status": "not-submitted",
+                            "error": safe_device_error(exc),
+                        }
+                    )
+                    break
+
+                submitted_ips.add(ip)
+                try:
+                    await set_name_call(
+                        session, ip, entry["new_name"], cookie_header, entry["current_name"]
                     )
                 except Exception as exc:
                     plan["unknown_ips"].add(ip)
@@ -919,20 +967,25 @@ async def rename_execute(
                             "ip": ip,
                             "current_name": entry["current_name"],
                             "new_name": entry["new_name"],
-                            "status": "stopped-before-verification",
+                            "status": "stopped-after-display-name-submission",
+                            "display_name_status": "uncertain",
+                            "recording_names_status": "not-submitted",
                             "error": safe_device_error(exc),
                         }
                     )
                     break
+
                 try:
                     after = await get_device_report_with_login(
                         session, ip, username, password, timeout=10.0
                     )
                     if (
                         after.get("name") != entry["new_name"]
-                        or settings_fingerprint(after) != entry["after_settings_sha256"]
+                        or settings_fingerprint(after) != entry["after_display_name_sha256"]
                     ):
-                        raise RuntimeError("Rename read-back did not match the approved payload.")
+                        raise RuntimeError(
+                            "Display-name read-back did not match the approved pre-recording state."
+                        )
                 except Exception as exc:
                     plan["unknown_ips"].add(ip)
                     results.append(
@@ -940,17 +993,70 @@ async def rename_execute(
                             "ip": ip,
                             "current_name": entry["current_name"],
                             "new_name": entry["new_name"],
-                            "status": "stopped-after-write",
+                            "status": "stopped-after-display-name-submission",
+                            "display_name_status": "uncertain",
+                            "recording_names_status": "not-submitted",
                             "error": safe_device_error(exc),
                         }
                     )
                     break
+
+                if entry["recording_changes"]:
+                    try:
+                        await import_settings_call(
+                            session,
+                            ip,
+                            entry["payload"],
+                            cookie_header,
+                            entry["new_name"],
+                        )
+                    except Exception as exc:
+                        plan["unknown_ips"].add(ip)
+                        results.append(
+                            {
+                                "ip": ip,
+                                "current_name": entry["current_name"],
+                                "new_name": entry["new_name"],
+                                "status": "stopped-after-recording-name-submission",
+                                "display_name_status": "verified",
+                                "recording_names_status": "uncertain",
+                                "error": safe_device_error(exc),
+                            }
+                        )
+                        break
+
+                    try:
+                        after = await get_device_report_with_login(
+                            session, ip, username, password, timeout=10.0
+                        )
+                        if settings_fingerprint(after) != entry["after_settings_sha256"]:
+                            raise RuntimeError(
+                                "Recording-name read-back did not match the approved final settings."
+                            )
+                    except Exception as exc:
+                        plan["unknown_ips"].add(ip)
+                        results.append(
+                            {
+                                "ip": ip,
+                                "current_name": entry["current_name"],
+                                "new_name": entry["new_name"],
+                                "status": "stopped-after-recording-name-submission",
+                                "display_name_status": "verified",
+                                "recording_names_status": "uncertain",
+                                "error": safe_device_error(exc),
+                            }
+                        )
+                        break
                 results.append(
                     {
                         "ip": ip,
                         "current_name": entry["current_name"],
                         "new_name": entry["new_name"],
                         "status": "renamed-and-verified",
+                        "display_name_status": "verified",
+                        "recording_names_status": (
+                            "verified" if entry["recording_changes"] else "not-needed"
+                        ),
                         "recording_changes": entry["recording_changes"],
                     }
                 )
@@ -963,9 +1069,26 @@ async def rename_execute(
                     "current_name": entry["current_name"],
                     "new_name": entry["new_name"],
                     "status": "not-submitted",
+                    "display_name_status": "not-submitted",
+                    "recording_names_status": "not-submitted",
                 }
             )
-    return {"plan_id": plan["plan_id"], "results": results}
+    fully_verified_count = sum(result["status"] == "renamed-and-verified" for result in results)
+    stopped_partial = fully_verified_count != len(plan["entries"])
+    if stopped_partial:
+        app.state.rename_scan_required = True
+    return {
+        "plan_id": plan["plan_id"],
+        "outcome": "fully-successful" if not stopped_partial else "stopped-partial",
+        "fresh_scan_and_plan_required": stopped_partial,
+        "summary": {
+            "target_count": len(plan["entries"]),
+            "submitted_count": len(submitted_ips),
+            "fully_verified_count": fully_verified_count,
+            "not_submitted_count": len(plan["entries"]) - len(submitted_ips),
+        },
+        "results": results,
+    }
 
 
 @app.get("/credential-rotation-inventory")

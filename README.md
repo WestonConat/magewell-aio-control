@@ -121,7 +121,7 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Update one firmware target | Uploads one exact-hash `.mwf`, starts one install, waits through reboot, and verifies identity and firmware. Neither mutation is retried. |
 | CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
 | Naming plan | Builds a reviewed rename plan from the latest successful scan; no device write. |
-| Rename batch | Reads each target, imports its new name, and resets every supported recording naming field in `rec-channels` from that name (`dir-name` becomes `NAME_REC`; `prefix-name` becomes `NAME_`), then reads back the full expected settings. Stops at the first uncertainty without retrying. |
+| Rename batch | Reads and identity-checks each target, submits the authenticated Magewell `set-name` call exactly once, and immediately verifies the display name plus unchanged recorder state. Only then, if supported recorder-name fields need changes, it submits one `import-settings` call to reset them (`dir-name` becomes `NAME_REC`; `prefix-name` becomes `NAME_`) and reads back the full expected settings. These are two non-atomic device calls; a stop reports the verified versus uncertain stage and submits no later target. |
 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
 credentials, an explicit UI confirmation, and a validated non-empty target set. Only one
@@ -148,10 +148,16 @@ device's journaled ID, collisions with devices not in the plan, failed scan repo
 unrecognized serial/MAC pairs, out-of-subnet targets, and plans above `MAX_UPDATE_DEVICES`.
 Review every IP/current-name/new-name pair and recording-value count. The write button
 remains disabled until `ENABLE_DEVICE_WRITES=true` has been loaded by recreating the backend.
-On confirmation the backend re-reads every target, checks its serial/MAC identity and settings
-fingerprint against the plan, performs one import, and reads it back. A failed import or
-read-back stops the remaining targets; do not retry that plan—scan and create a fresh plan
-after recovery.
+New names must use [Magewell's exact `set-name` contract](https://magewell.com/api-docs/ultra-encode-api/general/set-name.html):
+1–32 characters, only letters, numbers, spaces, and `._-+'[](),`, with no leading or trailing
+space. On confirmation the backend re-reads every target, checks its serial/MAC identity and
+settings fingerprint against the plan, submits `set-name` once, and immediately reads back the
+display name before it makes any recorder-settings import. If recorder fields require changes, it then submits one
+`import-settings` call and reads back the final full settings. The calls cannot be atomic. Any
+failed submission or read-back stops the remaining targets, reports the exact submitted,
+not-submitted, and fully verified counts plus the stage that is uncertain, and requires a fresh
+scan and fresh plan before any next run. Do not retry the stopped plan; recover or inspect that
+one device first.
 
 Credential rotation has a separate `ENABLE_CREDENTIAL_ROTATION` lock and accepts exactly
 one target per request. A fresh mixed-credential inventory classifies devices as `old`,

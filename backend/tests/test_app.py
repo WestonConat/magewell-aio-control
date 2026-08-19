@@ -21,8 +21,8 @@ from backend.app import (
     settings_fingerprint,
     validate_scan_network,
 )
-from backend.naming import build_rename_settings
 from backend.fleet_journal import current_name_matches_fleet_id
+from backend.naming import build_rename_settings, validate_new_name
 from backend.settings_merge import get_bulk_update_settings
 
 os.environ.setdefault("ALLOWED_SUBNET", "192.0.2.0/24")
@@ -261,6 +261,64 @@ def test_rename_settings_changes_only_name_and_recording_values() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "A",
+        "A" * 32,
+        "Stage 01",
+        "NAME._-+'[](),",
+    ],
+)
+def test_rename_name_validation_accepts_only_official_set_name_contract(value: str) -> None:
+    assert validate_new_name(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "A" * 33, " leading", "trailing ", "slash/name", "name!", "name\nnext"],
+)
+def test_rename_name_validation_rejects_outside_official_set_name_contract(value: str) -> None:
+    with pytest.raises(ValueError):
+        validate_new_name(value)
+
+
+def test_set_name_call_uses_authenticated_official_endpoint_without_retry() -> None:
+    requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def json(self) -> dict[str, int]:
+            return {"result": 0}
+
+    class FakeRequest:
+        async def __aenter__(self) -> FakeResponse:
+            return FakeResponse()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class FakeSession:
+        def get(self, url: str, *, params: dict[str, str], headers: dict[str, str]) -> FakeRequest:
+            requests.append({"url": url, "params": params, "headers": headers})
+            return FakeRequest()
+
+    result = asyncio.run(
+        app_module.set_name_call(FakeSession(), "192.0.2.10", "STAGE-01", "session-cookie", "OLD-A")
+    )
+
+    assert result == {"result": 0}
+    assert requests == [
+        {
+            "url": "http://192.0.2.10/usapi",
+            "params": {"method": "set-name", "name": "STAGE-01"},
+            "headers": {"Cookie": "session-cookie"},
+        }
+    ]
+
+
 def test_rename_plan_uses_journal_ids_and_rejects_name_collisions() -> None:
     app.state.devices = [
         {
@@ -359,6 +417,16 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
     )
     assert plan_response.status_code == 200
     plan_id = plan_response.json()["plan_id"]
+    after_display_name = {
+        "192.0.2.10": {
+            "name": "STAGE-01",
+            "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+        },
+        "192.0.2.11": {
+            "name": "STAGE-02",
+            "rec-channels": [{"dir-name": "OLD-B_REC", "prefix-name": "OLD-B_"}],
+        },
+    }
     after = {
         "192.0.2.10": {
             "name": "STAGE-01",
@@ -370,11 +438,11 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
         },
     }
     report_calls: dict[str, int] = {ip: 0 for ip in before}
-    submitted: list[str] = []
+    mutations: list[str] = []
 
     async def report(_session, ip, *_args, **_kwargs):
         report_calls[ip] += 1
-        return before[ip] if report_calls[ip] == 1 else after[ip]
+        return [before[ip], after_display_name[ip], after[ip]][report_calls[ip] - 1]
 
     async def login(*_args, **_kwargs):
         return "session-cookie"
@@ -382,8 +450,13 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
     async def identity(_session, ip, *_args, **_kwargs):
         return next(device["identity"] for device in app.state.devices if device["ip"] == ip)
 
+    async def set_name(_session, ip, name, *_args):
+        mutations.append(f"set-name:{ip}")
+        assert name == after[ip]["name"]
+        return {"result": 0}
+
     async def import_settings(_session, ip, payload, *_args):
-        submitted.append(ip)
+        mutations.append(f"import-settings:{ip}")
         assert payload == after[ip]
         return {"result": 0}
 
@@ -393,6 +466,7 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
     monkeypatch.setattr(app_module, "get_device_report_with_login", report)
     monkeypatch.setattr(app_module, "get_device_identity_with_login", identity)
     monkeypatch.setattr(app_module, "login_device", login)
+    monkeypatch.setattr(app_module, "set_name_call", set_name)
     monkeypatch.setattr(app_module, "import_settings_call", import_settings)
 
     response = client.post(
@@ -405,7 +479,19 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
         "renamed-and-verified",
         "renamed-and-verified",
     ]
-    assert submitted == ["192.0.2.10", "192.0.2.11"]
+    assert response.json()["outcome"] == "fully-successful"
+    assert response.json()["summary"] == {
+        "target_count": 2,
+        "submitted_count": 2,
+        "fully_verified_count": 2,
+        "not_submitted_count": 0,
+    }
+    assert mutations == [
+        "set-name:192.0.2.10",
+        "import-settings:192.0.2.10",
+        "set-name:192.0.2.11",
+        "import-settings:192.0.2.11",
+    ]
     retry = client.post(
         "/rename-execute",
         json={"plan_id": plan_id, "confirm": True},
@@ -413,6 +499,105 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
     )
     assert retry.status_code == 409
     assert "fresh plan" in retry.json()["detail"]
+
+
+def test_rename_execute_stops_after_recording_submission_and_marks_remaining_unsubmitted(
+    monkeypatch,
+) -> None:
+    before = {
+        "192.0.2.10": {
+            "name": "OLD-A",
+            "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+        },
+        "192.0.2.11": {
+            "name": "OLD-B",
+            "rec-channels": [{"dir-name": "OLD-B_REC", "prefix-name": "OLD-B_"}],
+        },
+    }
+    app.state.devices = [
+        {
+            "ip": ip,
+            "name": settings["name"],
+            "settings": settings,
+            "identity": {
+                "serial": "B313230202253" if ip.endswith("10") else "B313230505229",
+                "eth_mac": "d0:c8:57:81:58:86" if ip.endswith("10") else "d0:c8:57:81:c8:f5",
+                "fleet_id": "AIO-01" if ip.endswith("10") else "AIO-02",
+            },
+        }
+        for ip, settings in before.items()
+    ]
+    plan_id = client.post(
+        "/rename-plan",
+        json={"prefix": "STAGE", "device_ips": list(before)},
+        headers=OPERATOR_HEADERS,
+    ).json()["plan_id"]
+    display_reads = {
+        "192.0.2.10": {
+            "name": "STAGE-01",
+            "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+        }
+    }
+    report_calls: dict[str, int] = {ip: 0 for ip in before}
+    mutations: list[str] = []
+
+    async def report(_session, ip, *_args, **_kwargs):
+        report_calls[ip] += 1
+        if ip == "192.0.2.10" and report_calls[ip] == 2:
+            return display_reads[ip]
+        return before[ip]
+
+    async def identity(_session, ip, *_args, **_kwargs):
+        return next(device["identity"] for device in app.state.devices if device["ip"] == ip)
+
+    async def login(*_args, **_kwargs):
+        return "session-cookie"
+
+    async def set_name(_session, ip, *_args):
+        mutations.append(f"set-name:{ip}")
+        return {"result": 0}
+
+    async def failed_import(_session, ip, *_args):
+        mutations.append(f"import-settings:{ip}")
+        raise TimeoutError("ambiguous import response")
+
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "get_device_identity_with_login", identity)
+    monkeypatch.setattr(app_module, "login_device", login)
+    monkeypatch.setattr(app_module, "set_name_call", set_name)
+    monkeypatch.setattr(app_module, "import_settings_call", failed_import)
+
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": plan_id, "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["outcome"] == "stopped-partial"
+    assert body["fresh_scan_and_plan_required"] is True
+    assert body["summary"] == {
+        "target_count": 2,
+        "submitted_count": 1,
+        "fully_verified_count": 0,
+        "not_submitted_count": 1,
+    }
+    assert body["results"][0]["status"] == "stopped-after-recording-name-submission"
+    assert body["results"][0]["display_name_status"] == "verified"
+    assert body["results"][0]["recording_names_status"] == "uncertain"
+    assert body["results"][1]["status"] == "not-submitted"
+    assert mutations == ["set-name:192.0.2.10", "import-settings:192.0.2.10"]
+    fresh_scan_required = client.post(
+        "/rename-plan",
+        json={"prefix": "STAGE", "device_ips": list(before)},
+        headers=OPERATOR_HEADERS,
+    )
+    assert fresh_scan_required.status_code == 409
+    assert "fresh device scan" in fresh_scan_required.json()["detail"]
 
 
 def test_live_profile_rejects_schema_or_identity_mismatch() -> None:

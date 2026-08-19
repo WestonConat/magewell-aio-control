@@ -27,7 +27,38 @@ type RenameTarget = {
   recording_changes: Array<{ path: string; before: string; after: string }>;
 };
 type RenamePlan = { plan_id: string; targets: RenameTarget[] };
-type Result = RenameTarget & { status: string; error?: string };
+type Result = {
+  ip: string;
+  current_name: string;
+  new_name: string;
+  status: string;
+  display_name_status?: string;
+  recording_names_status?: string;
+  error?: string;
+};
+type RenameRun = {
+  outcome: "fully-successful" | "stopped-partial";
+  fresh_scan_and_plan_required: boolean;
+  summary: {
+    target_count: number;
+    submitted_count: number;
+    fully_verified_count: number;
+    not_submitted_count: number;
+  };
+  results: Result[];
+};
+
+const deviceNamePattern = /^[A-Za-z0-9 ._\-+'\[\]\(\),]+$/;
+
+function validateDeviceName(value: string): string | null {
+  if (value.length < 1 || value.length > 32)
+    return "new_name must contain 1 to 32 characters.";
+  if (value !== value.trim())
+    return "new_name cannot start or end with a space.";
+  if (!deviceNamePattern.test(value))
+    return "new_name may use only letters, numbers, spaces, and ._-+'[](),.";
+  return null;
+}
 
 async function apiError(response: Response): Promise<string> {
   try {
@@ -51,7 +82,7 @@ function parseCsv(text: string): Mapping[] {
         index += 1;
       } else quoted = !quoted;
     } else if (character === "," && !quoted) {
-      row.push(field.trim());
+      row.push(field);
       field = "";
     } else if ((character === "\n" || character === "\r") && !quoted) {
       if (character === "\r" && text[index + 1] === "\n") index += 1;
@@ -61,12 +92,12 @@ function parseCsv(text: string): Mapping[] {
       field = "";
     } else field += character;
   }
-  row.push(field.trim());
+  row.push(field);
   if (row.some(Boolean)) rows.push(row);
   if (quoted || rows.length < 2)
     throw new Error("CSV needs a header and at least one mapping row.");
   const headers = rows[0].map((value) =>
-    value.toLowerCase().replaceAll(" ", "_"),
+    value.trim().toLowerCase().replaceAll(" ", "_"),
   );
   const ipIndex = headers.indexOf("ip");
   const currentIndex = Math.max(
@@ -86,8 +117,10 @@ function parseCsv(text: string): Mapping[] {
   return rows.slice(1).map((values, index) => {
     const newName = values[newIndex] || "";
     if (!newName) throw new Error(`Row ${index + 2} has no new_name.`);
+    const nameError = validateDeviceName(newName);
+    if (nameError) throw new Error(`Row ${index + 2}: ${nameError}`);
     return ipIndex >= 0
-      ? { ip: values[ipIndex], new_name: newName }
+      ? { ip: values[ipIndex].trim(), new_name: newName }
       : { current_name: values[currentIndex], new_name: newName };
   });
 }
@@ -101,6 +134,7 @@ export default function NamingPage() {
   const [mappings, setMappings] = useState<Mapping[]>([]);
   const [plan, setPlan] = useState<RenamePlan | null>(null);
   const [results, setResults] = useState<Result[]>([]);
+  const [run, setRun] = useState<RenameRun | null>(null);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [writesEnabled, setWritesEnabled] = useState(false);
@@ -140,6 +174,7 @@ export default function NamingPage() {
     setMessage("");
     setPlan(null);
     setResults([]);
+    setRun(null);
     try {
       const response = await fetch(
         `${backendBaseUrl}/discover-magewell?subnet=${encodeURIComponent(subnet)}&per_ip_timeout=3&max_concurrent=20&settings_timeout=5&rescan=true`,
@@ -182,6 +217,7 @@ export default function NamingPage() {
     setLoading(true);
     setMessage("");
     setResults([]);
+    setRun(null);
     try {
       const body =
         mode === "csv" ? { mappings } : { prefix, device_ips: selectedIps };
@@ -228,9 +264,17 @@ export default function NamingPage() {
       if (!response.ok) throw new Error(await apiError(response));
       const data = await response.json();
       setResults(data.results || []);
-      setMessage(
-        "Rename run finished. Do not retry a stopped plan; scan and build a fresh plan.",
-      );
+      setRun(data);
+      if (data.outcome === "stopped-partial") {
+        setPlan(null);
+        setMessage(
+          `Stopped after ${data.summary.submitted_count} submitted of ${data.summary.target_count}; ${data.summary.not_submitted_count} were not submitted. Do not retry. Run a fresh scan and build a fresh plan.`,
+        );
+      } else {
+        setMessage(
+          `Fully successful: ${data.summary.fully_verified_count} of ${data.summary.target_count} device(s) renamed and verified.`,
+        );
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Rename run failed.");
     } finally {
@@ -313,13 +357,16 @@ export default function NamingPage() {
                   className={styles.input}
                   value={prefix}
                   onChange={(event) => setPrefix(event.target.value)}
+                  maxLength={29}
                 />
               </div>
             </div>
             <p className={styles.mutedCopy}>
               The fleet journal locks the suffix to serial + MAC:{" "}
               {prefix || "PREFIX"}-01, {prefix || "PREFIX"}-02, and so on. IP
-              address never determines a device number.
+              address never determines a device number. Final names must be 1–32
+              characters and use only letters, numbers, spaces, and
+              ._-+&apos;[](),.
             </p>
             <div className={styles.bulkActions}>
               <button
@@ -447,7 +494,21 @@ export default function NamingPage() {
       )}
       {results.length > 0 && (
         <section className={styles.encodersSection}>
-          <h2>Run result</h2>
+          <h2>
+            {run?.outcome === "stopped-partial"
+              ? "Stopped partial result"
+              : "Fully successful result"}
+          </h2>
+          {run && (
+            <p className={styles.mutedCopy}>
+              Submitted {run.summary.submitted_count} of{" "}
+              {run.summary.target_count}; {run.summary.not_submitted_count} not
+              submitted; {run.summary.fully_verified_count} fully verified.
+              {run.fresh_scan_and_plan_required
+                ? " A fresh scan and fresh plan are required before any next run."
+                : ""}
+            </p>
+          )}
           <div className={styles.renameRows}>
             {results.map((result) => (
               <div className={styles.renameRow} key={result.ip}>
@@ -465,6 +526,12 @@ export default function NamingPage() {
                   }
                 >
                   {result.status}
+                  {result.display_name_status
+                    ? ` · display name ${result.display_name_status}`
+                    : ""}
+                  {result.recording_names_status
+                    ? ` · recording names ${result.recording_names_status}`
+                    : ""}
                   {result.error ? ` · ${result.error}` : ""}
                 </span>
               </div>

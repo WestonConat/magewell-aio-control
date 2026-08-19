@@ -1,18 +1,21 @@
 """Pure helpers for the guarded device naming workflow."""
 
+import re
 from copy import deepcopy
 from typing import Any
 
+DEVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9 ._\-+'\[\]\(\),]+$")
+
 
 def validate_new_name(value: str) -> str:
-    name = value.strip()
-    if not name:
-        raise ValueError("New device name cannot be empty.")
-    if len(name) > 128:
-        raise ValueError("New device name exceeds the 128-character operator limit.")
-    if any(ord(character) < 32 or ord(character) == 127 for character in name):
-        raise ValueError("New device name cannot contain control characters.")
-    return name
+    """Validate the exact Magewell ``set-name`` API contract before any write."""
+    if not 1 <= len(value) <= 32:
+        raise ValueError("New device name must contain 1 to 32 characters.")
+    if value != value.strip():
+        raise ValueError("New device name cannot start or end with a space.")
+    if not DEVICE_NAME_PATTERN.fullmatch(value):
+        raise ValueError("New device name may use only letters, numbers, spaces, and ._-+'[](),.")
+    return value
 
 
 RECORDING_NAME_SUFFIXES = {
@@ -54,7 +57,12 @@ def reset_recording_name_values(
 def build_rename_settings(
     settings: dict[str, Any], current_name: str, new_name: str
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    """Return a target-local rename payload and the recording values it changes."""
+    """Return the final settings payload used only for recorder-name changes.
+
+    ``import-settings`` is not the device display-name mutation.  The caller must
+    use ``set-name`` first and read it back before submitting this full settings
+    snapshot to reset supported recording names.
+    """
     if settings.get("name") != current_name:
         raise ValueError("target settings identity does not match the scanned device")
     updated = deepcopy(settings)
