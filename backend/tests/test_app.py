@@ -251,11 +251,13 @@ def test_rename_settings_changes_only_name_and_recording_values() -> None:
     assert updated["eth"] == before["eth"]
     assert updated["rec-channels"] == [
         {"dir-name": "STAGE-01_REC", "prefix-name": "STAGE-01_"},
-        {"dir-name": "unrelated", "prefix-name": "VID"},
+        {"dir-name": "STAGE-01_REC", "prefix-name": "STAGE-01_"},
     ]
     assert [change["path"] for change in changes] == [
         "rec-channels.0.dir-name",
         "rec-channels.0.prefix-name",
+        "rec-channels.1.dir-name",
+        "rec-channels.1.prefix-name",
     ]
 
 

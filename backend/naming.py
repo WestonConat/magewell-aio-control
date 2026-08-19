@@ -15,31 +15,39 @@ def validate_new_name(value: str) -> str:
     return name
 
 
-def replace_recording_name_values(
-    value: Any, old_name: str, new_name: str, path: str = "rec-channels"
+RECORDING_NAME_SUFFIXES = {
+    "dir-name": "_REC",
+    "prefix-name": "_",
+}
+
+
+def reset_recording_name_values(
+    value: Any, new_name: str, path: str = "rec-channels"
 ) -> tuple[Any, list[dict[str, str]]]:
-    """Replace only literal old-name occurrences inside recording-channel values."""
+    """Reset every supported recording naming field from the new device name."""
     changes: list[dict[str, str]] = []
     if isinstance(value, dict):
         updated: dict[str, Any] = {}
         for key, child in value.items():
-            updated[key], child_changes = replace_recording_name_values(
-                child, old_name, new_name, f"{path}.{key}"
-            )
+            child_path = f"{path}.{key}"
+            if key in RECORDING_NAME_SUFFIXES and isinstance(child, str):
+                updated_value = f"{new_name}{RECORDING_NAME_SUFFIXES[key]}"
+                updated[key] = updated_value
+                if child != updated_value:
+                    changes.append({"path": child_path, "before": child, "after": updated_value})
+                continue
+            updated[key], child_changes = reset_recording_name_values(child, new_name, child_path)
             changes.extend(child_changes)
         return updated, changes
     if isinstance(value, list):
         updated_list = []
         for index, child in enumerate(value):
-            updated_child, child_changes = replace_recording_name_values(
-                child, old_name, new_name, f"{path}.{index}"
+            updated_child, child_changes = reset_recording_name_values(
+                child, new_name, f"{path}.{index}"
             )
             updated_list.append(updated_child)
             changes.extend(child_changes)
         return updated_list, changes
-    if isinstance(value, str) and old_name in value:
-        updated_value = value.replace(old_name, new_name)
-        return updated_value, [{"path": path, "before": value, "after": updated_value}]
     return value, changes
 
 
@@ -54,6 +62,6 @@ def build_rename_settings(
     channels = updated.get("rec-channels")
     if channels is None:
         return updated, []
-    updated_channels, changes = replace_recording_name_values(channels, current_name, new_name)
+    updated_channels, changes = reset_recording_name_values(channels, new_name)
     updated["rec-channels"] = updated_channels
     return updated, changes

@@ -121,7 +121,7 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Update one firmware target | Uploads one exact-hash `.mwf`, starts one install, waits through reboot, and verifies identity and firmware. Neither mutation is retried. |
 | CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
 | Naming plan | Builds a reviewed rename plan from the latest successful scan; no device write. |
-| Rename batch | Reads each target, imports its name plus literal matching values within `rec-channels`, then reads back the full expected settings. Stops at the first uncertainty without retrying. |
+| Rename batch | Reads each target, imports its new name, and resets every supported recording naming field in `rec-channels` from that name (`dir-name` becomes `NAME_REC`; `prefix-name` becomes `NAME_`), then reads back the full expected settings. Stops at the first uncertainty without retrying. |
 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
 credentials, an explicit UI confirmation, and a validated non-empty target set. Only one
