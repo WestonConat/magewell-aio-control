@@ -49,11 +49,11 @@ def required_name(prefix: str, fleet_id: str) -> str:
     clean_prefix = prefix.strip()
     if not clean_prefix:
         raise ValueError("Prefix cannot be empty.")
-    return f"{clean_prefix}_{fleet_number(fleet_id)}"
+    return f"{clean_prefix}-{fleet_number(fleet_id)}"
 
 
 def name_matches_fleet_id(name: str, fleet_id: str) -> bool:
-    return name.endswith(f"_{fleet_number(fleet_id)}")
+    return name.endswith(f"-{fleet_number(fleet_id)}")
 
 
 def current_name_matches_fleet_id(name: str, fleet_id: str) -> bool:

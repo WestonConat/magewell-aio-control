@@ -138,7 +138,7 @@ Open **Naming** in the local app after a fresh scan. Build one of two reviewable
 - **Fleet-journal prefix:** select devices and enter a prefix. Each target's two-digit
   suffix is derived only from the committed `backend/fleet_journal.csv` serial+Ethernet-MAC
   pair, so an IP move cannot renumber it. For example, the device journaled as `AIO-01`
-  becomes `ENCODER_01`, while `AIO-13` becomes `ENCODER_13`.
+  becomes `ENCODER-01`, while `AIO-13` becomes `ENCODER-13`.
 - **CSV mapping:** upload a UTF-8 CSV exported from Excel or Google Sheets with exactly
   `ip,new_name` or `current_name,new_name` headers. Existing-name mappings must resolve
   to exactly one device in the latest scan.

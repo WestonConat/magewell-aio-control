@@ -244,13 +244,13 @@ def test_rename_settings_changes_only_name_and_recording_values() -> None:
         "eth": {"ip": "192.0.2.10"},
     }
 
-    updated, changes = build_rename_settings(before, "ENCODER-01", "STAGE_01")
+    updated, changes = build_rename_settings(before, "ENCODER-01", "STAGE-01")
 
-    assert updated["name"] == "STAGE_01"
+    assert updated["name"] == "STAGE-01"
     assert updated["profile"] == before["profile"]
     assert updated["eth"] == before["eth"]
     assert updated["rec-channels"] == [
-        {"dir-name": "STAGE_01_REC", "prefix-name": "STAGE_01_"},
+        {"dir-name": "STAGE-01_REC", "prefix-name": "STAGE-01_"},
         {"dir-name": "unrelated", "prefix-name": "VID"},
     ]
     assert [change["path"] for change in changes] == [
@@ -302,14 +302,14 @@ def test_rename_plan_uses_journal_ids_and_rejects_name_collisions() -> None:
     )
     assert response.status_code == 200
     assert [(item["ip"], item["new_name"]) for item in response.json()["targets"]] == [
-        ("192.0.2.11", "STAGE_02"),
-        ("192.0.2.10", "STAGE_01"),
+        ("192.0.2.11", "STAGE-02"),
+        ("192.0.2.10", "STAGE-01"),
     ]
-    app.state.devices[2]["name"] = "STAGE_01"
-    app.state.devices[2]["settings"]["name"] = "STAGE_01"
+    app.state.devices[2]["name"] = "STAGE-01"
+    app.state.devices[2]["settings"]["name"] = "STAGE-01"
     collision = client.post(
         "/rename-plan",
-        json={"mappings": [{"ip": "192.0.2.10", "new_name": "STAGE_01"}]},
+        json={"mappings": [{"ip": "192.0.2.10", "new_name": "STAGE-01"}]},
         headers=OPERATOR_HEADERS,
     )
     assert collision.status_code == 400
@@ -359,12 +359,12 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
     plan_id = plan_response.json()["plan_id"]
     after = {
         "192.0.2.10": {
-            "name": "STAGE_01",
-            "rec-channels": [{"dir-name": "STAGE_01_REC", "prefix-name": "STAGE_01_"}],
+            "name": "STAGE-01",
+            "rec-channels": [{"dir-name": "STAGE-01_REC", "prefix-name": "STAGE-01_"}],
         },
         "192.0.2.11": {
-            "name": "STAGE_02",
-            "rec-channels": [{"dir-name": "STAGE_02_REC", "prefix-name": "STAGE_02_"}],
+            "name": "STAGE-02",
+            "rec-channels": [{"dir-name": "STAGE-02_REC", "prefix-name": "STAGE-02_"}],
         },
     }
     report_calls: dict[str, int] = {ip: 0 for ip in before}

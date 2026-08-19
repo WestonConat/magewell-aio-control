@@ -318,7 +318,7 @@ export default function NamingPage() {
             </div>
             <p className={styles.mutedCopy}>
               The fleet journal locks the suffix to serial + MAC:{" "}
-              {prefix || "PREFIX"}_01, {prefix || "PREFIX"}_02, and so on. IP
+              {prefix || "PREFIX"}-01, {prefix || "PREFIX"}-02, and so on. IP
               address never determines a device number.
             </p>
             <div className={styles.bulkActions}>
@@ -364,7 +364,7 @@ export default function NamingPage() {
                     {device.fleet_id
                       ? ` · ${device.fleet_id}`
                       : " · journal mismatch"}
-                    {device.name_journal_mismatch ? " · suffix mismatch" : ""}
+                    {device.name_journal_mismatch ? " · fleet ID mismatch" : ""}
                   </span>
                   <small>
                     {device.ip}

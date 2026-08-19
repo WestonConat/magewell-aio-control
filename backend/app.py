@@ -739,7 +739,7 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
             if not name_matches_fleet_id(new_name, fleet_id):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Rename for {ip} must end with the journal suffix _{fleet_id[-2:]}.",
+                    detail=f"Rename for {ip} must end with the journal suffix -{fleet_id[-2:]}.",
                 )
             targets.append((ip, device["name"], new_name, fleet_id))
     else:
