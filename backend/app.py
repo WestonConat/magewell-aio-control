@@ -15,6 +15,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
+from .fleet_journal import (
+    current_name_matches_fleet_id,
+    find_fleet_id,
+    journal_sha256,
+    name_matches_fleet_id,
+    required_name,
+)
 from .naming import build_rename_settings, validate_new_name
 from .settings_merge import get_bulk_update_settings
 
@@ -58,8 +65,6 @@ class RenameMapping(BaseModel):
 class RenamePlanRequest(BaseModel):
     mappings: list[RenameMapping] = Field(default_factory=list)
     prefix: str | None = None
-    start: int = Field(default=1, ge=0, le=999999)
-    width: int = Field(default=2, ge=1, le=6)
     device_ips: list[str] = Field(default_factory=list)
 
 
@@ -286,6 +291,16 @@ def public_device_list(devices: list[dict[str, Any]]) -> list[dict[str, str]]:
         public_device = {"ip": device["ip"], "name": device.get("name", "")}
         if device.get("read_error"):
             public_device["read_error"] = device["read_error"]
+        if device.get("identity"):
+            identity = device["identity"]
+            public_device["serial"] = identity["serial"]
+            public_device["eth_mac"] = identity["eth_mac"]
+            public_device["fleet_id"] = identity.get("fleet_id", "")
+            public_device["name_journal_mismatch"] = not current_name_matches_fleet_id(
+                device.get("name", ""), identity["fleet_id"]
+            )
+        if device.get("identity_error"):
+            public_device["identity_error"] = device["identity_error"]
         public_devices.append(public_device)
     return public_devices
 
@@ -427,6 +442,41 @@ async def get_device_report_with_login(
                 raise RuntimeError("SETTINGS report is not a JSON object")
             return settings_data
     raise RuntimeError("Report contains no SETTINGS section")
+
+
+async def get_device_identity_with_login(
+    session: aiohttp.ClientSession,
+    magewell_ip: str,
+    username: str,
+    password: str,
+    timeout: float = 2.0,
+) -> dict[str, str]:
+    """Read the immutable serial/MAC pair used to bind a device to the fleet journal."""
+    cookie_header = await login_device(
+        session, magewell_ip, username, md5_hash(password), magewell_ip
+    )
+    async with session.get(
+        f"http://{magewell_ip}/usapi",
+        params={"method": "get-info"},
+        headers={"Cookie": cookie_header},
+        timeout=timeout,
+    ) as response:
+        response.raise_for_status()
+        data = await response.json()
+    if data.get("result") not in (0, "0"):
+        raise RuntimeError(f"Device rejected get-info with result {data.get('result')!r}")
+    product = data.get("product")
+    mac_addresses = data.get("mac-addr")
+    if not isinstance(product, dict) or not isinstance(mac_addresses, dict):
+        raise RuntimeError("Device identity response is incomplete.")
+    serial = product.get("sn")
+    eth_mac = mac_addresses.get("eth")
+    if not isinstance(serial, str) or not serial.strip() or not isinstance(eth_mac, str):
+        raise RuntimeError("Device identity response is missing serial or Ethernet MAC.")
+    fleet_id = find_fleet_id(serial, eth_mac)
+    if not fleet_id:
+        raise RuntimeError("Device serial/MAC pair is not present in the fleet journal.")
+    return {"serial": serial.strip(), "eth_mac": eth_mac.lower(), "fleet_id": fleet_id}
 
 
 async def identify_rotation_device(
@@ -586,15 +636,36 @@ async def discover_magewell(
             ),
             return_exceptions=True,
         )
+        identity_results = await asyncio.gather(
+            *(
+                get_device_identity_with_login(
+                    session,
+                    ip,
+                    username,
+                    password,
+                    settings_timeout,
+                )
+                for ip, report in zip(magewell_ips, report_results)
+                if not isinstance(report, Exception)
+            ),
+            return_exceptions=True,
+        )
 
     devices = []
+    successful_identity_results = iter(identity_results)
     for ip, report in zip(magewell_ips, report_results):
         if isinstance(report, Exception):
             error = safe_device_error(report)
             logger.error("Could not read settings from %s: %s", ip, error)
             devices.append({"ip": ip, "name": "", "settings": {}, "read_error": error})
         else:
-            devices.append({"ip": ip, "name": report.get("name", ""), "settings": report})
+            device = {"ip": ip, "name": report.get("name", ""), "settings": report}
+            identity = next(successful_identity_results)
+            if isinstance(identity, Exception):
+                device["identity_error"] = safe_device_error(identity)
+            else:
+                device["identity"] = identity
+            devices.append(device)
     app.state.devices = devices
     return {"devices": public_device_list(devices), "cached": False}
 
@@ -604,7 +675,12 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
     cached_devices = {
         item["ip"]: item
         for item in getattr(app.state, "devices", [])
-        if item.get("name") and item.get("settings") and not item.get("read_error")
+        if (
+            item.get("name")
+            and item.get("settings")
+            and item.get("identity", {}).get("fleet_id")
+            and not item.get("read_error")
+        )
     }
     if not cached_devices:
         raise HTTPException(
@@ -616,7 +692,7 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
             detail="Provide either CSV mappings or a prefix sequence, not both.",
         )
 
-    targets: list[tuple[str, str, str]] = []
+    targets: list[tuple[str, str, str, str]] = []
     if request.mappings:
         seen_ips: set[str] = set()
         for row in request.mappings:
@@ -651,7 +727,14 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
             if ip in seen_ips:
                 raise HTTPException(status_code=400, detail=f"Duplicate rename target: {ip}")
             seen_ips.add(ip)
-            targets.append((ip, device["name"], validate_new_name(row.new_name)))
+            fleet_id = device["identity"]["fleet_id"]
+            new_name = validate_new_name(row.new_name)
+            if not name_matches_fleet_id(new_name, fleet_id):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Rename for {ip} must end with the journal suffix _{fleet_id[-2:]}.",
+                )
+            targets.append((ip, device["name"], new_name, fleet_id))
     else:
         prefix = validate_new_name(request.prefix or "")
         requested_ips = request.device_ips or list(cached_devices)
@@ -667,9 +750,10 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
                 normalized_ips.append(ip)
         if not normalized_ips:
             raise HTTPException(status_code=400, detail="Select at least one prefix target.")
-        for index, ip in enumerate(sorted(normalized_ips, key=ipaddress.ip_address)):
-            new_name = validate_new_name(f"{prefix}_{request.start + index:0{request.width}d}")
-            targets.append((ip, cached_devices[ip]["name"], new_name))
+        for ip in normalized_ips:
+            fleet_id = cached_devices[ip]["identity"]["fleet_id"]
+            new_name = validate_new_name(required_name(prefix, fleet_id))
+            targets.append((ip, cached_devices[ip]["name"], new_name, fleet_id))
 
     if len(targets) > get_max_update_devices():
         raise HTTPException(
@@ -679,12 +763,12 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
                 "Split the mapping into safe batches instead of raising the cap."
             ),
         )
-    new_names = [new_name for _, _, new_name in targets]
+    new_names = [new_name for _, _, new_name, _ in targets]
     if len(new_names) != len(set(new_names)):
         raise HTTPException(
             status_code=400, detail="New device names must be unique within a plan."
         )
-    target_ips = {ip for ip, _, _ in targets}
+    target_ips = {ip for ip, _, _, _ in targets}
     unchanged_names = {
         device["name"] for ip, device in cached_devices.items() if ip not in target_ips
     }
@@ -696,12 +780,15 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
         )
 
     entries = []
-    for ip, current_name, new_name in targets:
+    for ip, current_name, new_name, fleet_id in targets:
         settings = cached_devices[ip]["settings"]
         payload, recording_changes = build_rename_settings(settings, current_name, new_name)
         entries.append(
             {
                 "ip": ip,
+                "fleet_id": fleet_id,
+                "serial": cached_devices[ip]["identity"]["serial"],
+                "eth_mac": cached_devices[ip]["identity"]["eth_mac"],
                 "current_name": current_name,
                 "new_name": new_name,
                 "before_settings_sha256": settings_fingerprint(settings),
@@ -711,7 +798,13 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
             }
         )
     plan_id = uuid.uuid4().hex
-    plan = {"plan_id": plan_id, "entries": entries, "executed": False, "unknown_ips": set()}
+    plan = {
+        "plan_id": plan_id,
+        "journal_sha256": journal_sha256(),
+        "entries": entries,
+        "executed": False,
+        "unknown_ips": set(),
+    }
     plans = getattr(app.state, "rename_plans", None)
     if plans is None:
         plans = {}
@@ -723,11 +816,15 @@ def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
 def public_rename_plan(plan: dict[str, Any]) -> dict[str, Any]:
     return {
         "plan_id": plan["plan_id"],
+        "journal_sha256": plan["journal_sha256"],
         "targets": [
             {
                 key: entry[key]
                 for key in (
                     "ip",
+                    "fleet_id",
+                    "serial",
+                    "eth_mac",
                     "current_name",
                     "new_name",
                     "before_settings_sha256",
@@ -768,6 +865,11 @@ async def rename_execute(
             status_code=409,
             detail="This rename plan was already submitted or has an uncertain result. Scan and build a fresh plan before any retry.",
         )
+    if plan["journal_sha256"] != journal_sha256():
+        raise HTTPException(
+            status_code=409,
+            detail="Fleet journal changed since this plan was built. Scan and build a fresh plan.",
+        )
     username, password = get_device_credentials()
     lock = get_mutation_lock()
     if lock.locked():
@@ -784,9 +886,15 @@ async def rename_execute(
                     before = await get_device_report_with_login(
                         session, ip, username, password, timeout=10.0
                     )
+                    identity = await get_device_identity_with_login(
+                        session, ip, username, password, timeout=10.0
+                    )
                     if (
                         before.get("name") != entry["current_name"]
                         or settings_fingerprint(before) != entry["before_settings_sha256"]
+                        or identity["serial"] != entry["serial"]
+                        or identity["eth_mac"] != entry["eth_mac"]
+                        or identity["fleet_id"] != entry["fleet_id"]
                     ):
                         raise RuntimeError(
                             "Live device identity or settings changed since the rename plan."

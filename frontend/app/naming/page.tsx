@@ -7,10 +7,21 @@ const backendBaseUrl = (
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000"
 ).replace(/\/$/, "");
 
-type Device = { ip: string; name: string };
+type Device = {
+  ip: string;
+  name: string;
+  fleet_id?: string;
+  serial?: string;
+  eth_mac?: string;
+  identity_error?: string;
+  name_journal_mismatch?: boolean;
+};
 type Mapping = { ip?: string; current_name?: string; new_name: string };
 type RenameTarget = {
   ip: string;
+  fleet_id: string;
+  serial: string;
+  eth_mac: string;
   current_name: string;
   new_name: string;
   recording_changes: Array<{ path: string; before: string; after: string }>;
@@ -86,8 +97,6 @@ export default function NamingPage() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [mode, setMode] = useState<"prefix" | "csv">("prefix");
   const [prefix, setPrefix] = useState("ENCODER");
-  const [start, setStart] = useState("1");
-  const [width, setWidth] = useState("2");
   const [selectedIps, setSelectedIps] = useState<string[]>([]);
   const [mappings, setMappings] = useState<Mapping[]>([]);
   const [plan, setPlan] = useState<RenamePlan | null>(null);
@@ -120,7 +129,7 @@ export default function NamingPage() {
   const sortedDevices = useMemo(
     () =>
       [...devices].sort((left, right) =>
-        left.ip.localeCompare(right.ip, undefined, { numeric: true }),
+        (left.fleet_id || "ZZZ").localeCompare(right.fleet_id || "ZZZ"),
       ),
     [devices],
   );
@@ -139,9 +148,10 @@ export default function NamingPage() {
       if (!response.ok) throw new Error(await apiError(response));
       const found = (await response.json()).devices || [];
       setDevices(found);
-      setSelectedIps(found.map((device: Device) => device.ip));
+      const journaled = found.filter((device: Device) => device.fleet_id);
+      setSelectedIps(journaled.map((device: Device) => device.ip));
       setMessage(
-        `${found.length} devices read successfully. Review a rename plan before any write.`,
+        `${found.length} devices read; ${journaled.length} match the immutable fleet journal. Review a rename plan before any write.`,
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Scan failed.");
@@ -174,14 +184,7 @@ export default function NamingPage() {
     setResults([]);
     try {
       const body =
-        mode === "csv"
-          ? { mappings }
-          : {
-              prefix,
-              start: Number(start),
-              width: Number(width),
-              device_ips: selectedIps,
-            };
+        mode === "csv" ? { mappings } : { prefix, device_ips: selectedIps };
       const response = await fetch(`${backendBaseUrl}/rename-plan`, {
         method: "POST",
         headers: {
@@ -285,7 +288,7 @@ export default function NamingPage() {
                 setPlan(null);
               }}
             >
-              Prefix sequence
+              Fleet journal
             </button>
             <button
               type="button"
@@ -312,36 +315,22 @@ export default function NamingPage() {
                   onChange={(event) => setPrefix(event.target.value)}
                 />
               </div>
-              <div className={styles.fieldGroup}>
-                <label className={styles.label}>Start</label>
-                <input
-                  className={styles.input}
-                  inputMode="numeric"
-                  value={start}
-                  onChange={(event) => setStart(event.target.value)}
-                />
-              </div>
-              <div className={styles.fieldGroup}>
-                <label className={styles.label}>Digits</label>
-                <input
-                  className={styles.input}
-                  inputMode="numeric"
-                  value={width}
-                  onChange={(event) => setWidth(event.target.value)}
-                />
-              </div>
             </div>
             <p className={styles.mutedCopy}>
-              IP order is deterministic: {prefix || "PREFIX"}_
-              {String(Number(start) || 0).padStart(Number(width) || 2, "0")}.
-              Choose the targets below.
+              The fleet journal locks the suffix to serial + MAC:{" "}
+              {prefix || "PREFIX"}_01, {prefix || "PREFIX"}_02, and so on. IP
+              address never determines a device number.
             </p>
             <div className={styles.bulkActions}>
               <button
                 type="button"
                 className={styles.textButton}
                 onClick={() =>
-                  setSelectedIps(devices.map((device) => device.ip))
+                  setSelectedIps(
+                    devices
+                      .filter((device) => device.fleet_id)
+                      .map((device) => device.ip),
+                  )
                 }
               >
                 Select all
@@ -360,6 +349,7 @@ export default function NamingPage() {
                   <input
                     type="checkbox"
                     checked={selectedIps.includes(device.ip)}
+                    disabled={!device.fleet_id}
                     onChange={() => {
                       setPlan(null);
                       setSelectedIps((current) =>
@@ -369,8 +359,17 @@ export default function NamingPage() {
                       );
                     }}
                   />
-                  <span>{device.name || "Unnamed"}</span>
-                  <small>{device.ip}</small>
+                  <span>
+                    {device.name || "Unnamed"}
+                    {device.fleet_id
+                      ? ` · ${device.fleet_id}`
+                      : " · journal mismatch"}
+                    {device.name_journal_mismatch ? " · suffix mismatch" : ""}
+                  </span>
+                  <small>
+                    {device.ip}
+                    {device.identity_error ? ` · ${device.identity_error}` : ""}
+                  </small>
                 </label>
               ))}
             </div>
@@ -425,7 +424,9 @@ export default function NamingPage() {
               <div className={styles.renameRow} key={target.ip}>
                 <span>
                   <strong>{target.current_name}</strong>
-                  <small>{target.ip}</small>
+                  <small>
+                    {target.ip} · {target.fleet_id}
+                  </small>
                 </span>
                 <b>→</b>
                 <span>

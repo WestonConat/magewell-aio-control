@@ -244,30 +244,57 @@ def test_rename_settings_changes_only_name_and_recording_values() -> None:
     ]
 
 
-def test_rename_plan_prefix_is_ip_ordered_and_rejects_name_collisions(monkeypatch) -> None:
+def test_rename_plan_uses_journal_ids_and_rejects_name_collisions() -> None:
     app.state.devices = [
-        {"ip": "192.0.2.11", "name": "B", "settings": {"name": "B", "rec-channels": []}},
-        {"ip": "192.0.2.10", "name": "A", "settings": {"name": "A", "rec-channels": []}},
-        {"ip": "192.0.2.12", "name": "KEEP", "settings": {"name": "KEEP", "rec-channels": []}},
+        {
+            "ip": "192.0.2.11",
+            "name": "B",
+            "settings": {"name": "B", "rec-channels": []},
+            "identity": {
+                "serial": "B313230505229",
+                "eth_mac": "d0:c8:57:81:c8:f5",
+                "fleet_id": "AIO-02",
+            },
+        },
+        {
+            "ip": "192.0.2.10",
+            "name": "A",
+            "settings": {"name": "A", "rec-channels": []},
+            "identity": {
+                "serial": "B313230202253",
+                "eth_mac": "d0:c8:57:81:58:86",
+                "fleet_id": "AIO-01",
+            },
+        },
+        {
+            "ip": "192.0.2.12",
+            "name": "KEEP_13",
+            "settings": {"name": "KEEP_13", "rec-channels": []},
+            "identity": {
+                "serial": "B313230505230",
+                "eth_mac": "d0:c8:57:81:99:23",
+                "fleet_id": "AIO-13",
+            },
+        },
     ]
     response = client.post(
         "/rename-plan",
         json={
             "prefix": "STAGE",
-            "start": 1,
-            "width": 2,
             "device_ips": ["192.0.2.11", "192.0.2.10"],
         },
         headers=OPERATOR_HEADERS,
     )
     assert response.status_code == 200
     assert [(item["ip"], item["new_name"]) for item in response.json()["targets"]] == [
-        ("192.0.2.10", "STAGE_01"),
         ("192.0.2.11", "STAGE_02"),
+        ("192.0.2.10", "STAGE_01"),
     ]
+    app.state.devices[2]["name"] = "STAGE_01"
+    app.state.devices[2]["settings"]["name"] = "STAGE_01"
     collision = client.post(
         "/rename-plan",
-        json={"mappings": [{"ip": "192.0.2.10", "new_name": "KEEP"}]},
+        json={"mappings": [{"ip": "192.0.2.10", "new_name": "STAGE_01"}]},
         headers=OPERATOR_HEADERS,
     )
     assert collision.status_code == 400
@@ -296,7 +323,16 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
         },
     }
     app.state.devices = [
-        {"ip": ip, "name": settings["name"], "settings": settings}
+        {
+            "ip": ip,
+            "name": settings["name"],
+            "settings": settings,
+            "identity": {
+                "serial": "B313230202253" if ip.endswith("10") else "B313230505229",
+                "eth_mac": "d0:c8:57:81:58:86" if ip.endswith("10") else "d0:c8:57:81:c8:f5",
+                "fleet_id": "AIO-01" if ip.endswith("10") else "AIO-02",
+            },
+        }
         for ip, settings in before.items()
     ]
     plan_response = client.post(
@@ -326,6 +362,9 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
     async def login(*_args, **_kwargs):
         return "session-cookie"
 
+    async def identity(_session, ip, *_args, **_kwargs):
+        return next(device["identity"] for device in app.state.devices if device["ip"] == ip)
+
     async def import_settings(_session, ip, payload, *_args):
         submitted.append(ip)
         assert payload == after[ip]
@@ -335,6 +374,7 @@ def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch
     monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
     monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
     monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "get_device_identity_with_login", identity)
     monkeypatch.setattr(app_module, "login_device", login)
     monkeypatch.setattr(app_module, "import_settings_call", import_settings)
 

@@ -135,18 +135,20 @@ device's expected and actual fingerprint.
 
 Open **Naming** in the local app after a fresh scan. Build one of two reviewable plans:
 
-- **Prefix sequence:** select devices, enter a prefix, start number, and width. Targets
-  are always numbered by numeric IP address, so `ENCODER`, `1`, and `2` becomes
-  `ENCODER_01`, `ENCODER_02`, and so on.
+- **Fleet-journal prefix:** select devices and enter a prefix. Each target's two-digit
+  suffix is derived only from the committed `backend/fleet_journal.csv` serial+Ethernet-MAC
+  pair, so an IP move cannot renumber it. For example, the device journaled as `AIO-01`
+  becomes `ENCODER_01`, while `AIO-13` becomes `ENCODER_13`.
 - **CSV mapping:** upload a UTF-8 CSV exported from Excel or Google Sheets with exactly
   `ip,new_name` or `current_name,new_name` headers. Existing-name mappings must resolve
   to exactly one device in the latest scan.
 
-The plan rejects duplicate targets or new names, collisions with devices not in the plan,
-failed scan reports, out-of-subnet targets, and plans above `MAX_UPDATE_DEVICES`. Review
-every IP/current-name/new-name pair and recording-value count. The write button remains
-disabled until `ENABLE_DEVICE_WRITES=true` has been loaded by recreating the backend. On
-confirmation the backend re-reads every target, checks its identity and settings
+The plan rejects duplicate targets or new names, a CSV name whose suffix does not match the
+device's journaled ID, collisions with devices not in the plan, failed scan reports,
+unrecognized serial/MAC pairs, out-of-subnet targets, and plans above `MAX_UPDATE_DEVICES`.
+Review every IP/current-name/new-name pair and recording-value count. The write button
+remains disabled until `ENABLE_DEVICE_WRITES=true` has been loaded by recreating the backend.
+On confirmation the backend re-reads every target, checks its serial/MAC identity and settings
 fingerprint against the plan, performs one import, and reads it back. A failed import or
 read-back stops the remaining targets; do not retry that plan—scan and create a fresh plan
 after recovery.
