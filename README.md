@@ -224,7 +224,8 @@ If an older firmware update preserves identity/version but resets only
 `rec-channels.0.is-use` from the receipt's `1` to `0`, the guarded recovery command can restore
 that single value. It refuses any other unexpected drift, creates a durable no-retry receipt,
 submits the current settings with only that value repaired, and verifies the full settings
-snapshot before fleet progression:
+snapshot before fleet progression. Read-only verification waits through the device's temporary
+settings-loading state; it never resubmits the repair:
 
 ```bash
 docker compose exec -T backend python -m backend.firmware_cli restore-recording-one \

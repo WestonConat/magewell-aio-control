@@ -1127,8 +1127,22 @@ async def restore_recording_channel_one(
         assert_operator_approved_identity(verified_observed, expected_serial, expected_eth_mac)
         if verified_settings.get("name") != expected_name:
             raise FirmwareSafetyError("Recording recovery found a post-write name mismatch.")
-        verified_status = await get_device_status(session, normalized_ip, cookie_header)
-        verified_background_bits = assert_idle_status(verified_status, post_update=True)
+        verified_background_bits = 0
+        for status_attempt in range(1, 11):
+            verified_status = await get_device_status(session, normalized_ip, cookie_header)
+            try:
+                verified_background_bits = assert_idle_status(verified_status, post_update=True)
+                break
+            except FirmwareSafetyError:
+                cur_status = verified_status.get("cur-status")
+                non_background_bits = (
+                    cur_status & BLOCKED_STATUS_MASK & ~(STATUS_SEARCH_WIFI | STATUS_CONNECT_WIFI)
+                    if isinstance(cur_status, int)
+                    else -1
+                )
+                if non_background_bits != STATUS_LOADING or status_attempt == 10:
+                    raise
+                await asyncio.sleep(1)
 
     verified_preservation = settings_preservation_report(before_settings, verified_settings)
     if not verified_preservation["preserved"]:

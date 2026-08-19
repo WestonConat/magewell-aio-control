@@ -860,7 +860,7 @@ def test_recording_recovery_restores_only_receipt_bound_enable_flag(monkeypatch,
         valid_preflight(),
     )
     firmware.record_effect_state(run_dir, "recovery-verified-settings-changed")
-    calls = {"import": 0}
+    calls = {"import": 0, "status": 0}
 
     async def fake_login(*args, **kwargs):
         return "sid=test"
@@ -872,8 +872,9 @@ def test_recording_recovery_restores_only_receipt_bound_enable_flag(monkeypatch,
         return copy.deepcopy(current)
 
     async def fake_status(*args, **kwargs):
+        calls["status"] += 1
         status = valid_status()
-        status["cur-status"] = 0x400000
+        status["cur-status"] = 0x1000000 if calls["status"] == 2 else 0x400000
         return status
 
     async def fake_import(*args, **kwargs):
@@ -905,6 +906,7 @@ def test_recording_recovery_restores_only_receipt_bound_enable_flag(monkeypatch,
     assert result["status"] == "recording-recovery-verified"
     assert result["restored_value"] == 1
     assert calls["import"] == 1
+    assert calls["status"] == 3
     assert (run_dir / "recording-recovery.lock").is_file()
     assert json.loads((run_dir / "firmware-state.json").read_text())["state"] == (
         "recording-recovery-verified"
