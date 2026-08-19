@@ -35,6 +35,8 @@ DEFAULT_ALLOWED_SUBNET = "127.0.0.1/32"
 DEFAULT_ALLOWED_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
 OPERATOR_INTENT_HEADER = "X-Magewell-Operator-Intent"
 OPERATOR_INTENT_VALUE = "confirmed"
+RENAME_READBACK_ATTEMPTS = 6
+RENAME_READBACK_INTERVAL_SECONDS = 2
 
 
 class DeviceSelection(BaseModel):
@@ -435,6 +437,38 @@ async def set_name_call(
         raise RuntimeError(f"Device rejected name change with result {result.get('result')!r}")
     logger.info("Display name updated for device %s", magewell_id)
     return result
+
+
+async def read_rename_stage_until_settled(
+    session: aiohttp.ClientSession,
+    magewell_ip: str,
+    username: str,
+    password: str,
+    expected_name: str,
+    expected_settings_sha256: str,
+    mismatch_message: str,
+) -> tuple[dict[str, Any], int]:
+    """Read a naming stage until it is visible, without resubmitting its mutation.
+
+    Magewell can acknowledge an accepted mutation before its report endpoint reflects
+    the new settings.  These are bounded, read-only checks: the preceding ``set-name``
+    or ``import-settings`` request is never repeated.
+    """
+    for attempt in range(1, RENAME_READBACK_ATTEMPTS + 1):
+        report = await get_device_report_with_login(
+            session, magewell_ip, username, password, timeout=10.0
+        )
+        if (
+            report.get("name") == expected_name
+            and settings_fingerprint(report) == expected_settings_sha256
+        ):
+            return report, attempt
+        if attempt < RENAME_READBACK_ATTEMPTS:
+            await asyncio.sleep(RENAME_READBACK_INTERVAL_SECONDS)
+    raise RuntimeError(
+        f"{mismatch_message} after {RENAME_READBACK_ATTEMPTS} read-only checks over "
+        "a ten-second settle window."
+    )
 
 
 async def get_device_report_with_login(
@@ -989,16 +1023,15 @@ async def rename_execute(
                     break
 
                 try:
-                    after = await get_device_report_with_login(
-                        session, ip, username, password, timeout=10.0
+                    _, display_readback_attempts = await read_rename_stage_until_settled(
+                        session,
+                        ip,
+                        username,
+                        password,
+                        entry["new_name"],
+                        entry["after_display_name_sha256"],
+                        "Display-name read-back did not match the approved pre-recording state",
                     )
-                    if (
-                        after.get("name") != entry["new_name"]
-                        or settings_fingerprint(after) != entry["after_display_name_sha256"]
-                    ):
-                        raise RuntimeError(
-                            "Display-name read-back did not match the approved pre-recording state."
-                        )
                 except Exception as exc:
                     plan["unknown_ips"].add(ip)
                     results.append(
@@ -1032,6 +1065,7 @@ async def rename_execute(
                                 "new_name": entry["new_name"],
                                 "status": "stopped-after-recording-name-submission",
                                 "display_name_status": "verified",
+                                "display_name_readback_attempts": display_readback_attempts,
                                 "recording_names_status": "uncertain",
                                 "error": safe_device_error(exc),
                             }
@@ -1039,13 +1073,15 @@ async def rename_execute(
                         break
 
                     try:
-                        after = await get_device_report_with_login(
-                            session, ip, username, password, timeout=10.0
+                        _, recording_readback_attempts = await read_rename_stage_until_settled(
+                            session,
+                            ip,
+                            username,
+                            password,
+                            entry["new_name"],
+                            entry["after_settings_sha256"],
+                            "Recording-name read-back did not match the approved final settings",
                         )
-                        if settings_fingerprint(after) != entry["after_settings_sha256"]:
-                            raise RuntimeError(
-                                "Recording-name read-back did not match the approved final settings."
-                            )
                     except Exception as exc:
                         plan["unknown_ips"].add(ip)
                         results.append(
@@ -1055,6 +1091,7 @@ async def rename_execute(
                                 "new_name": entry["new_name"],
                                 "status": "stopped-after-recording-name-submission",
                                 "display_name_status": "verified",
+                                "display_name_readback_attempts": display_readback_attempts,
                                 "recording_names_status": "uncertain",
                                 "error": safe_device_error(exc),
                             }
@@ -1067,8 +1104,14 @@ async def rename_execute(
                         "new_name": entry["new_name"],
                         "status": "renamed-and-verified",
                         "display_name_status": "verified",
+                        "display_name_readback_attempts": display_readback_attempts,
                         "recording_names_status": (
                             "verified" if entry["recording_changes"] else "not-needed"
+                        ),
+                        **(
+                            {"recording_names_readback_attempts": recording_readback_attempts}
+                            if entry["recording_changes"]
+                            else {}
                         ),
                         "recording_changes": entry["recording_changes"],
                     }

@@ -33,7 +33,9 @@ type Result = {
   new_name: string;
   status: string;
   display_name_status?: string;
+  display_name_readback_attempts?: number;
   recording_names_status?: string;
+  recording_names_readback_attempts?: number;
   error?: string;
 };
 type RenameRun = {
@@ -58,6 +60,12 @@ function validateDeviceName(value: string): string | null {
   if (!deviceNamePattern.test(value))
     return "new_name may use only letters, numbers, spaces, and ._-+'[](),.";
   return null;
+}
+
+function settledReadbackLabel(stage: string, attempts?: number): string {
+  return attempts && attempts > 1
+    ? ` · ${stage} settled after ${attempts} read-only checks`
+    : "";
 }
 
 async function apiError(response: Response): Promise<string> {
@@ -523,9 +531,17 @@ export default function NamingPage() {
                   {result.display_name_status
                     ? ` · display name ${result.display_name_status}`
                     : ""}
+                  {settledReadbackLabel(
+                    "display-name readback",
+                    result.display_name_readback_attempts,
+                  )}
                   {result.recording_names_status
                     ? ` · recording names ${result.recording_names_status}`
                     : ""}
+                  {settledReadbackLabel(
+                    "recording-name readback",
+                    result.recording_names_readback_attempts,
+                  )}
                   {result.error ? ` · ${result.error}` : ""}
                 </span>
               </div>
