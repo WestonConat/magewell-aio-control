@@ -121,7 +121,7 @@ export default function HomePage() {
     try {
       const url = `${backendBaseUrl}/discover-magewell?subnet=${encodeURIComponent(
         subnetToScan,
-      )}&per_ip_timeout=1.0&max_concurrent=50&rescan=${forceRescan}`;
+      )}&per_ip_timeout=3&max_concurrent=20&settings_timeout=5&rescan=${forceRescan}`;
       const response = await fetch(url, {
         headers: { "X-Magewell-Operator-Intent": "confirmed" },
       });

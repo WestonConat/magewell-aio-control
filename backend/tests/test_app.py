@@ -21,6 +21,7 @@ from backend.app import (
     settings_fingerprint,
     validate_scan_network,
 )
+from backend.naming import build_rename_settings
 from backend.settings_merge import get_bulk_update_settings
 
 os.environ.setdefault("ALLOWED_SUBNET", "192.0.2.0/24")
@@ -215,6 +216,146 @@ def test_live_profile_preserves_target_local_settings() -> None:
     frozen["rec-channels"][0]["dir-name"] = "CHANGED"
     assert source["rec-channels"][0]["dir-name"] == "CONTROL"
     assert target["rec-channels"][0]["dir-name"] == "TARGET-01"
+
+
+def test_rename_settings_changes_only_name_and_recording_values() -> None:
+    before = {
+        "name": "ENCODER-01",
+        "profile": {"mode": "camera"},
+        "rec-channels": [
+            {"dir-name": "ENCODER-01_REC", "prefix-name": "ENCODER-01_"},
+            {"dir-name": "unrelated", "prefix-name": "VID"},
+        ],
+        "eth": {"ip": "192.0.2.10"},
+    }
+
+    updated, changes = build_rename_settings(before, "ENCODER-01", "STAGE_01")
+
+    assert updated["name"] == "STAGE_01"
+    assert updated["profile"] == before["profile"]
+    assert updated["eth"] == before["eth"]
+    assert updated["rec-channels"] == [
+        {"dir-name": "STAGE_01_REC", "prefix-name": "STAGE_01_"},
+        {"dir-name": "unrelated", "prefix-name": "VID"},
+    ]
+    assert [change["path"] for change in changes] == [
+        "rec-channels.0.dir-name",
+        "rec-channels.0.prefix-name",
+    ]
+
+
+def test_rename_plan_prefix_is_ip_ordered_and_rejects_name_collisions(monkeypatch) -> None:
+    app.state.devices = [
+        {"ip": "192.0.2.11", "name": "B", "settings": {"name": "B", "rec-channels": []}},
+        {"ip": "192.0.2.10", "name": "A", "settings": {"name": "A", "rec-channels": []}},
+        {"ip": "192.0.2.12", "name": "KEEP", "settings": {"name": "KEEP", "rec-channels": []}},
+    ]
+    response = client.post(
+        "/rename-plan",
+        json={
+            "prefix": "STAGE",
+            "start": 1,
+            "width": 2,
+            "device_ips": ["192.0.2.11", "192.0.2.10"],
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 200
+    assert [(item["ip"], item["new_name"]) for item in response.json()["targets"]] == [
+        ("192.0.2.10", "STAGE_01"),
+        ("192.0.2.11", "STAGE_02"),
+    ]
+    collision = client.post(
+        "/rename-plan",
+        json={"mappings": [{"ip": "192.0.2.10", "new_name": "KEEP"}]},
+        headers=OPERATOR_HEADERS,
+    )
+    assert collision.status_code == 400
+    assert "collides" in collision.json()["detail"]
+
+
+def test_rename_execute_is_locked_before_device_network_access() -> None:
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": "does-not-matter", "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 403
+    assert "Device writes are locked" in response.json()["detail"]
+
+
+def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch) -> None:
+    before = {
+        "192.0.2.10": {
+            "name": "OLD-A",
+            "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+        },
+        "192.0.2.11": {
+            "name": "OLD-B",
+            "rec-channels": [{"dir-name": "OLD-B_REC", "prefix-name": "OLD-B_"}],
+        },
+    }
+    app.state.devices = [
+        {"ip": ip, "name": settings["name"], "settings": settings}
+        for ip, settings in before.items()
+    ]
+    plan_response = client.post(
+        "/rename-plan",
+        json={"prefix": "STAGE", "device_ips": list(before)},
+        headers=OPERATOR_HEADERS,
+    )
+    assert plan_response.status_code == 200
+    plan_id = plan_response.json()["plan_id"]
+    after = {
+        "192.0.2.10": {
+            "name": "STAGE_01",
+            "rec-channels": [{"dir-name": "STAGE_01_REC", "prefix-name": "STAGE_01_"}],
+        },
+        "192.0.2.11": {
+            "name": "STAGE_02",
+            "rec-channels": [{"dir-name": "STAGE_02_REC", "prefix-name": "STAGE_02_"}],
+        },
+    }
+    report_calls: dict[str, int] = {ip: 0 for ip in before}
+    submitted: list[str] = []
+
+    async def report(_session, ip, *_args, **_kwargs):
+        report_calls[ip] += 1
+        return before[ip] if report_calls[ip] == 1 else after[ip]
+
+    async def login(*_args, **_kwargs):
+        return "session-cookie"
+
+    async def import_settings(_session, ip, payload, *_args):
+        submitted.append(ip)
+        assert payload == after[ip]
+        return {"result": 0}
+
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "login_device", login)
+    monkeypatch.setattr(app_module, "import_settings_call", import_settings)
+
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": plan_id, "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 200
+    assert [result["status"] for result in response.json()["results"]] == [
+        "renamed-and-verified",
+        "renamed-and-verified",
+    ]
+    assert submitted == ["192.0.2.10", "192.0.2.11"]
+    retry = client.post(
+        "/rename-execute",
+        json={"plan_id": plan_id, "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+    assert retry.status_code == 409
+    assert "fresh plan" in retry.json()["detail"]
 
 
 def test_live_profile_rejects_schema_or_identity_mismatch() -> None:

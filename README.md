@@ -1,9 +1,10 @@
 # Magewell AIO Control
 
 Magewell AIO Control is a local Next.js and FastAPI utility for discovering Magewell
-Ultra Encode AIO devices, reading one device as a control-settings source, and applying
-settings to explicitly selected targets. It is intended for a supervised local-network
-maintenance window, not as an unattended fleet service.
+Ultra Encode AIO devices, reading one device as a control-settings source, applying
+settings to explicitly selected targets, and planning guarded bulk device naming. It is
+intended for a supervised local-network maintenance window, not as an unattended fleet
+service.
 
 The application is safe by default: it uses a loopback-only subnet, never scans on page
 load, and rejects every device-write request unless the operator explicitly enables the
@@ -83,7 +84,7 @@ NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000 npm --prefix frontend run dev
 | `MAGEWELL_PASSWORD` | empty | Required before any real device report read or write; never commit it. |
 | `MAGEWELL_OLD_PASSWORD` | empty | Temporary rotation input; inject only into the disposable backend process and never store it. |
 | `ENABLE_CREDENTIAL_ROTATION` | `false` | Separate lock for one-device-at-a-time password rotation; cannot be enabled with Camera-profile writes. |
-| `ENABLE_DEVICE_WRITES` | `false` | Camera-profile write boundary. Never enable it together with credential rotation. |
+| `ENABLE_DEVICE_WRITES` | `false` | Device configuration write boundary, including profiles and naming. Never enable it together with credential rotation. |
 | `ENABLE_FIRMWARE_UPDATES` | `false` | Single-device firmware boundary. Camera-profile writes and credential rotation must remain locked. |
 | `MAX_SCAN_HOSTS` | `1024` | Maximum hosts in one requested scan; hard ceiling is 4096. |
 | `MAX_UPDATE_DEVICES` | `100` | Maximum unique targets in one write request; hard ceiling is 500. |
@@ -99,7 +100,7 @@ writes also require the UI's `X-Magewell-Operator-Intent: confirmed` header, and
 requests from origins outside `ALLOWED_ORIGINS` are rejected before device network access.
 The header is an intent/CSRF guard, not a secret or a replacement for the write lock.
 
-Embedded-baseline and CSV writes are disabled. Every supported write starts from a
+Embedded-baseline and CSV *settings* writes are disabled. Every supported profile write starts from a
 deep-copied settings payload read from an operator-selected live control device. Target-
 local identity, management-network, recording-path, and asset-inventory settings are
 preserved from each target's successful scan report. The backend rejects schema-mismatched
@@ -119,6 +120,8 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Firmware preflight | Reads one device's identity, hardware, firmware, settings fingerprint, running state, and stream activity. |
 | Update one firmware target | Uploads one exact-hash `.mwf`, starts one install, waits through reboot, and verifies identity and firmware. Neither mutation is retried. |
 | CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
+| Naming plan | Builds a reviewed rename plan from the latest successful scan; no device write. |
+| Rename batch | Reads each target, imports its name plus literal matching values within `rec-channels`, then reads back the full expected settings. Stops at the first uncertainty without retrying. |
 
 Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
 credentials, an explicit UI confirmation, and a validated non-empty target set. Only one
@@ -127,6 +130,26 @@ an ambiguous response from causing a silent second submission. After an accepted
 the UI locks target changes and further writes until the operator runs its read-only
 verification. Verification stops on the first mismatch or read error and reports each
 device's expected and actual fingerprint.
+
+## Naming devices
+
+Open **Naming** in the local app after a fresh scan. Build one of two reviewable plans:
+
+- **Prefix sequence:** select devices, enter a prefix, start number, and width. Targets
+  are always numbered by numeric IP address, so `ENCODER`, `1`, and `2` becomes
+  `ENCODER_01`, `ENCODER_02`, and so on.
+- **CSV mapping:** upload a UTF-8 CSV exported from Excel or Google Sheets with exactly
+  `ip,new_name` or `current_name,new_name` headers. Existing-name mappings must resolve
+  to exactly one device in the latest scan.
+
+The plan rejects duplicate targets or new names, collisions with devices not in the plan,
+failed scan reports, out-of-subnet targets, and plans above `MAX_UPDATE_DEVICES`. Review
+every IP/current-name/new-name pair and recording-value count. The write button remains
+disabled until `ENABLE_DEVICE_WRITES=true` has been loaded by recreating the backend. On
+confirmation the backend re-reads every target, checks its identity and settings
+fingerprint against the plan, performs one import, and reads it back. A failed import or
+read-back stops the remaining targets; do not retry that plan—scan and create a fresh plan
+after recovery.
 
 Credential rotation has a separate `ENABLE_CREDENTIAL_ROTATION` lock and accepts exactly
 one target per request. A fresh mixed-credential inventory classifies devices as `old`,

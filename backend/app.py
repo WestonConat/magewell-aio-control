@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+import uuid
 from typing import Any
 
 import aiohttp
@@ -14,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
+from .naming import build_rename_settings, validate_new_name
 from .settings_merge import get_bulk_update_settings
 
 logging.basicConfig(
@@ -44,6 +46,25 @@ class VerifyTargetRequest(BaseModel):
 
 class CredentialRotationRequest(BaseModel):
     device: DeviceSelection
+    confirm: bool = False
+
+
+class RenameMapping(BaseModel):
+    ip: str | None = None
+    current_name: str | None = None
+    new_name: str = Field(min_length=1, max_length=128)
+
+
+class RenamePlanRequest(BaseModel):
+    mappings: list[RenameMapping] = Field(default_factory=list)
+    prefix: str | None = None
+    start: int = Field(default=1, ge=0, le=999999)
+    width: int = Field(default=2, ge=1, le=6)
+    device_ips: list[str] = Field(default_factory=list)
+
+
+class RenameExecuteRequest(BaseModel):
+    plan_id: str = Field(min_length=1, max_length=128)
     confirm: bool = False
 
 
@@ -576,6 +597,260 @@ async def discover_magewell(
             devices.append({"ip": ip, "name": report.get("name", ""), "settings": report})
     app.state.devices = devices
     return {"devices": public_device_list(devices), "cached": False}
+
+
+def build_rename_plan(request: RenamePlanRequest) -> dict[str, Any]:
+    """Build a frozen, target-local rename plan from the latest successful scan."""
+    cached_devices = {
+        item["ip"]: item
+        for item in getattr(app.state, "devices", [])
+        if item.get("name") and item.get("settings") and not item.get("read_error")
+    }
+    if not cached_devices:
+        raise HTTPException(
+            status_code=400, detail="Run a successful device scan before planning names."
+        )
+    if bool(request.mappings) == bool(request.prefix):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide either CSV mappings or a prefix sequence, not both.",
+        )
+
+    targets: list[tuple[str, str, str]] = []
+    if request.mappings:
+        seen_ips: set[str] = set()
+        for row in request.mappings:
+            if bool(row.ip) == bool(row.current_name):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Each mapping needs exactly one of ip or current_name.",
+                )
+            if row.ip:
+                ip = validate_device_ip(row.ip)
+                device = cached_devices.get(ip)
+                if not device:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Mapping IP {ip} is not in the latest successful scan.",
+                    )
+            else:
+                matches = [
+                    (ip, device)
+                    for ip, device in cached_devices.items()
+                    if device["name"] == row.current_name
+                ]
+                if len(matches) != 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Existing name {row.current_name!r} must match exactly one "
+                            "device in the latest successful scan."
+                        ),
+                    )
+                ip, device = matches[0]
+            if ip in seen_ips:
+                raise HTTPException(status_code=400, detail=f"Duplicate rename target: {ip}")
+            seen_ips.add(ip)
+            targets.append((ip, device["name"], validate_new_name(row.new_name)))
+    else:
+        prefix = validate_new_name(request.prefix or "")
+        requested_ips = request.device_ips or list(cached_devices)
+        normalized_ips: list[str] = []
+        for raw_ip in requested_ips:
+            ip = validate_device_ip(raw_ip)
+            if ip not in cached_devices:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Prefix target {ip} is not in the latest successful scan.",
+                )
+            if ip not in normalized_ips:
+                normalized_ips.append(ip)
+        if not normalized_ips:
+            raise HTTPException(status_code=400, detail="Select at least one prefix target.")
+        for index, ip in enumerate(sorted(normalized_ips, key=ipaddress.ip_address)):
+            new_name = validate_new_name(f"{prefix}_{request.start + index:0{request.width}d}")
+            targets.append((ip, cached_devices[ip]["name"], new_name))
+
+    if len(targets) > get_max_update_devices():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Plan has {len(targets)} targets; MAX_UPDATE_DEVICES is {get_max_update_devices()}. "
+                "Split the mapping into safe batches instead of raising the cap."
+            ),
+        )
+    new_names = [new_name for _, _, new_name in targets]
+    if len(new_names) != len(set(new_names)):
+        raise HTTPException(
+            status_code=400, detail="New device names must be unique within a plan."
+        )
+    target_ips = {ip for ip, _, _ in targets}
+    unchanged_names = {
+        device["name"] for ip, device in cached_devices.items() if ip not in target_ips
+    }
+    collisions = sorted(set(new_names) & unchanged_names)
+    if collisions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"New name collides with an unchanged device: {', '.join(collisions)}",
+        )
+
+    entries = []
+    for ip, current_name, new_name in targets:
+        settings = cached_devices[ip]["settings"]
+        payload, recording_changes = build_rename_settings(settings, current_name, new_name)
+        entries.append(
+            {
+                "ip": ip,
+                "current_name": current_name,
+                "new_name": new_name,
+                "before_settings_sha256": settings_fingerprint(settings),
+                "after_settings_sha256": settings_fingerprint(payload),
+                "recording_changes": recording_changes,
+                "payload": payload,
+            }
+        )
+    plan_id = uuid.uuid4().hex
+    plan = {"plan_id": plan_id, "entries": entries, "executed": False, "unknown_ips": set()}
+    plans = getattr(app.state, "rename_plans", None)
+    if plans is None:
+        plans = {}
+        app.state.rename_plans = plans
+    plans[plan_id] = plan
+    return plan
+
+
+def public_rename_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "plan_id": plan["plan_id"],
+        "targets": [
+            {
+                key: entry[key]
+                for key in (
+                    "ip",
+                    "current_name",
+                    "new_name",
+                    "before_settings_sha256",
+                    "after_settings_sha256",
+                    "recording_changes",
+                )
+            }
+            for entry in plan["entries"]
+        ],
+    }
+
+
+@app.post("/rename-plan")
+async def rename_plan(
+    request: RenamePlanRequest,
+    x_magewell_operator_intent: str | None = Header(None),
+    origin: str | None = Header(None),
+) -> dict[str, Any]:
+    require_operator_intent(x_magewell_operator_intent, origin)
+    return public_rename_plan(build_rename_plan(request))
+
+
+@app.post("/rename-execute")
+async def rename_execute(
+    request: RenameExecuteRequest,
+    x_magewell_operator_intent: str | None = Header(None),
+    origin: str | None = Header(None),
+) -> dict[str, Any]:
+    require_operator_intent(x_magewell_operator_intent, origin)
+    require_device_writes(request.confirm)
+    plan = getattr(app.state, "rename_plans", {}).get(request.plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=404, detail="Rename plan was not found. Build a fresh plan."
+        )
+    if plan["executed"] or plan["unknown_ips"]:
+        raise HTTPException(
+            status_code=409,
+            detail="This rename plan was already submitted or has an uncertain result. Scan and build a fresh plan before any retry.",
+        )
+    username, password = get_device_credentials()
+    lock = get_mutation_lock()
+    if lock.locked():
+        raise HTTPException(status_code=409, detail="Another device mutation is already running.")
+
+    results: list[dict[str, Any]] = []
+    plan["executed"] = True
+    async with lock:
+        connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            for entry in plan["entries"]:
+                ip = entry["ip"]
+                try:
+                    before = await get_device_report_with_login(
+                        session, ip, username, password, timeout=10.0
+                    )
+                    if (
+                        before.get("name") != entry["current_name"]
+                        or settings_fingerprint(before) != entry["before_settings_sha256"]
+                    ):
+                        raise RuntimeError(
+                            "Live device identity or settings changed since the rename plan."
+                        )
+                    cookie_header = await login_device(
+                        session, ip, username, md5_hash(password), entry["current_name"]
+                    )
+                    await import_settings_call(
+                        session, ip, entry["payload"], cookie_header, entry["current_name"]
+                    )
+                except Exception as exc:
+                    plan["unknown_ips"].add(ip)
+                    results.append(
+                        {
+                            "ip": ip,
+                            "current_name": entry["current_name"],
+                            "new_name": entry["new_name"],
+                            "status": "stopped-before-verification",
+                            "error": safe_device_error(exc),
+                        }
+                    )
+                    break
+                try:
+                    after = await get_device_report_with_login(
+                        session, ip, username, password, timeout=10.0
+                    )
+                    if (
+                        after.get("name") != entry["new_name"]
+                        or settings_fingerprint(after) != entry["after_settings_sha256"]
+                    ):
+                        raise RuntimeError("Rename read-back did not match the approved payload.")
+                except Exception as exc:
+                    plan["unknown_ips"].add(ip)
+                    results.append(
+                        {
+                            "ip": ip,
+                            "current_name": entry["current_name"],
+                            "new_name": entry["new_name"],
+                            "status": "stopped-after-write",
+                            "error": safe_device_error(exc),
+                        }
+                    )
+                    break
+                results.append(
+                    {
+                        "ip": ip,
+                        "current_name": entry["current_name"],
+                        "new_name": entry["new_name"],
+                        "status": "renamed-and-verified",
+                        "recording_changes": entry["recording_changes"],
+                    }
+                )
+    completed_ips = {result["ip"] for result in results}
+    for entry in plan["entries"]:
+        if entry["ip"] not in completed_ips:
+            results.append(
+                {
+                    "ip": entry["ip"],
+                    "current_name": entry["current_name"],
+                    "new_name": entry["new_name"],
+                    "status": "not-submitted",
+                }
+            )
+    return {"plan_id": plan["plan_id"], "results": results}
 
 
 @app.get("/credential-rotation-inventory")
