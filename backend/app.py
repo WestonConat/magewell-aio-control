@@ -1324,15 +1324,18 @@ async def verify_target(
         async with aiohttp.ClientSession(connector=connector) as session:
             actual = ""
             verification_attempts = 0
-            for verification_attempts in range(1, 4):
+            # Magewell may acknowledge a settings import before its next report reflects
+            # every applied field. Polling remains read-only; a longer settle window avoids
+            # treating a still-applying target as a failed write.
+            for verification_attempts in range(1, 7):
                 report = await get_device_report_with_login(
                     session, ip, username, password, timeout=10.0
                 )
                 actual = settings_fingerprint(report)
                 if actual == expected:
                     break
-                if verification_attempts < 3:
-                    await asyncio.sleep(1)
+                if verification_attempts < 6:
+                    await asyncio.sleep(2)
     except Exception as exc:
         error = safe_device_error(exc)
         logger.error(
