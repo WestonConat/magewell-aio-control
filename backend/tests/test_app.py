@@ -3,6 +3,7 @@ import os
 
 import aiohttp
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend import app as app_module
@@ -10,9 +11,12 @@ from backend.app import (
     OPERATOR_INTENT_VALUE,
     PushUpdateRequest,
     app,
+    enabled_effect_modes,
     public_device_list,
     push_update_for_device,
     push_updates,
+    require_credential_rotation,
+    require_device_writes,
     safe_device_error,
     settings_fingerprint,
     validate_scan_network,
@@ -35,9 +39,38 @@ def test_health_reports_safe_write_boundary() -> None:
         "allowed_subnet": "192.0.2.0/24",
         "device_reads_configured": False,
         "device_writes_enabled": False,
+        "firmware_updates_enabled": False,
         "credential_rotation_configured": False,
         "credential_rotation_enabled": False,
+        "effect_configuration_valid": True,
+        "active_effect_mode": None,
     }
+
+
+@pytest.mark.parametrize(
+    ("profile", "rotation", "firmware"),
+    [
+        (True, True, False),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ],
+)
+def test_all_multi_effect_configurations_fail_closed(
+    monkeypatch, profile: bool, rotation: bool, firmware: bool
+) -> None:
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", str(profile).lower())
+    monkeypatch.setenv("ENABLE_CREDENTIAL_ROTATION", str(rotation).lower())
+    monkeypatch.setenv("ENABLE_FIRMWARE_UPDATES", str(firmware).lower())
+    assert len(enabled_effect_modes()) > 1
+    with pytest.raises(HTTPException, match="Invalid effect configuration"):
+        require_device_writes(confirm=True)
+    with pytest.raises(HTTPException, match="Invalid effect configuration"):
+        require_credential_rotation(confirm=True)
+    response = client.get("/healthz")
+    assert response.json()["status"] == "invalid-effect-configuration"
+    assert response.json()["effect_configuration_valid"] is False
+    assert response.json()["active_effect_mode"] is None
 
 
 def test_scan_must_stay_inside_allowed_subnet() -> None:
@@ -125,7 +158,7 @@ def test_credential_rotation_requires_profile_writes_to_be_locked(monkeypatch) -
         headers=OPERATOR_HEADERS,
     )
     assert response.status_code == 409
-    assert "cannot be enabled together" in response.json()["detail"]
+    assert "Invalid effect configuration" in response.json()["detail"]
 
 
 def test_scan_host_cap_is_enforced(monkeypatch) -> None:
