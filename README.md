@@ -114,6 +114,7 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Manual CIDR device scan | Sends read-only ping, login, and report requests inside `ALLOWED_SUBNET`. |
 | Known-IP device discovery | Sends the same read-only ping, login, identity, and report requests only to an operator-supplied, de-duplicated list of IPv4 addresses inside `ALLOWED_SUBNET`; invalid, duplicate, or oversized input is rejected before device network access. |
 | Select control source | Freezes a deep copy of the already-read live settings and returns its SHA-256; no device write. |
+| Profile-plan receipt | Uses only the accepted cached scan and frozen source to show a redacted, ephemeral compatibility/fingerprint plan for the exact selected targets; it opens no device connection, simulates no import, authorizes no write, and is invalidated when inventory, source, target selection, or relevant configuration changes. |
 | Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
 | Verify target | Performs up to six read-only report checks over a ten-second settle window and compares SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write or mutation retry. |
 | Credential inventory | Authenticates each responder with the new credential first, then the old credential; no device write. |
@@ -131,6 +132,11 @@ not require restarting the backend to set a development write flag. Only one mut
 run at a time. The mutation call is intentionally not retried, preventing an ambiguous response
 from causing a silent second submission. Naming refuses to run while firmware updates or
 credential rotation are armed.
+
+The profile-plan receipt is a read-only operator aid, not a write prerequisite. It contains only
+source/target identities and deterministic fingerprints, never raw settings, credentials, device
+URLs, or cookies. Generate a fresh plan after any source, target, inventory, or configuration
+change; an old plan is deliberately not retained or reused by the backend.
 
 ## Naming devices
 

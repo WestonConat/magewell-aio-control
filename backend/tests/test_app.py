@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import os
 
 import aiohttp
@@ -885,6 +886,236 @@ def test_control_source_classifies_target_schema_compatibility() -> None:
             "reason": ("target schema is missing source profile settings: enable-ndi-bridge"),
         }
     ]
+
+
+def test_profile_plan_is_deterministic_redacted_and_uses_cached_state(monkeypatch) -> None:
+    source_settings = {
+        "name": "SOURCE-01",
+        "profile": {"mode": "camera"},
+        "wifi": [{"passwd": "secret"}],
+    }
+    target_settings = {
+        "name": "TARGET-01",
+        "profile": {"mode": "old"},
+        "wifi": [{"passwd": "target-secret"}],
+    }
+    app.state.devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "SOURCE-01",
+            "settings": source_settings,
+            "identity": {
+                "serial": "SOURCE-SERIAL",
+                "eth_mac": "00:11:22:33:44:55",
+                "fleet_id": "AIO-01",
+            },
+        },
+        {
+            "ip": "192.0.2.11",
+            "name": "TARGET-01",
+            "settings": target_settings,
+            "identity": {
+                "serial": "TARGET-SERIAL",
+                "eth_mac": "00:11:22:33:44:66",
+                "fleet_id": "AIO-02",
+            },
+        },
+    ]
+    app.state.control_settings = copy.deepcopy(source_settings)
+    app.state.control_device_ip = "192.0.2.10"
+    app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
+    before_devices = copy.deepcopy(app.state.devices)
+    before_control = copy.deepcopy(app.state.control_settings)
+    network_calls = []
+
+    async def should_not_contact_device(*args, **kwargs):
+        network_calls.append(args)
+        raise AssertionError("profile plan contacted a device")
+
+    monkeypatch.setattr(app_module, "ping_magewell", should_not_contact_device)
+    monkeypatch.setattr(app_module, "get_device_report_with_login", should_not_contact_device)
+    monkeypatch.setattr(app_module, "get_device_credentials", should_not_contact_device)
+
+    request = {"devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}]}
+    first = client.post("/profile-plan", json=request, headers=OPERATOR_HEADERS)
+    second = client.post("/profile-plan", json=request, headers=OPERATOR_HEADERS)
+
+    assert first.status_code == 200
+    assert second.json() == first.json()
+    assert first.json()["mode"] == "read-only-compatibility-plan"
+    assert first.json()["all_targets_profile_compatible"] is True
+    assert first.json()["targets"][0]["expected_settings_sha256"]
+    assert "settings" not in first.json()["source"]
+    assert "settings" not in first.json()["targets"][0]
+    assert "secret" not in str(first.json())
+    assert network_calls == []
+    assert app.state.devices == before_devices
+    assert app.state.control_settings == before_control
+
+    app.state.devices[1]["settings"]["profile"] = {"mode": "new"}
+    changed_target = client.post("/profile-plan", json=request, headers=OPERATOR_HEADERS)
+    assert changed_target.status_code == 200
+    assert changed_target.json()["plan_id"] != first.json()["plan_id"]
+
+    app.state.devices.append(
+        {
+            "ip": "192.0.2.12",
+            "name": "INVENTORY-ONLY",
+            "settings": {"name": "INVENTORY-ONLY", "profile": {"mode": "old"}},
+            "identity": {"serial": "INVENTORY", "eth_mac": "00:11:22:33:44:77"},
+        }
+    )
+    changed_inventory = client.post("/profile-plan", json=request, headers=OPERATOR_HEADERS)
+    assert changed_inventory.status_code == 200
+    assert changed_inventory.json()["plan_id"] != changed_target.json()["plan_id"]
+    assert changed_inventory.json()["inventory_sha256"] != changed_target.json()["inventory_sha256"]
+    assert network_calls == []
+
+
+def test_profile_plan_requires_operator_intent_before_cached_state_access() -> None:
+    response = client.post(
+        "/profile-plan",
+        json={"devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}]},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Explicit operator intent is required."
+
+
+def test_profile_plan_rejects_stale_source_before_network_or_state_mutation(monkeypatch) -> None:
+    source_settings = {"name": "SOURCE-01", "profile": {"mode": "camera"}}
+    app.state.devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "SOURCE-01",
+            "settings": {"name": "SOURCE-01", "profile": {"mode": "changed"}},
+            "identity": {"serial": "SOURCE", "eth_mac": "00:11:22:33:44:55"},
+        },
+        {
+            "ip": "192.0.2.11",
+            "name": "TARGET-01",
+            "settings": {"name": "TARGET-01", "profile": {"mode": "old"}},
+            "identity": {"serial": "TARGET", "eth_mac": "00:11:22:33:44:66"},
+        },
+    ]
+    app.state.control_settings = copy.deepcopy(source_settings)
+    app.state.control_device_ip = "192.0.2.10"
+    app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
+    before_devices = copy.deepcopy(app.state.devices)
+    before_control = copy.deepcopy(app.state.control_settings)
+    network_calls = []
+
+    async def should_not_contact_device(*args, **kwargs):
+        network_calls.append(args)
+        raise AssertionError("stale profile plan contacted a device")
+
+    monkeypatch.setattr(app_module, "get_device_report_with_login", should_not_contact_device)
+
+    response = client.post(
+        "/profile-plan",
+        json={"devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}]},
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Latest-scan source configuration changed; select the control device again."
+    )
+    assert network_calls == []
+    assert app.state.devices == before_devices
+    assert app.state.control_settings == before_control
+
+
+def test_profile_plan_reports_cached_incompatibility_without_network_access(monkeypatch) -> None:
+    source_settings = {"name": "SOURCE-01", "profile": {"mode": "camera"}, "bridge": True}
+    app.state.devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "SOURCE-01",
+            "settings": source_settings,
+            "identity": {"serial": "SOURCE", "eth_mac": "00:11:22:33:44:55"},
+        },
+        {
+            "ip": "192.0.2.11",
+            "name": "TARGET-01",
+            "settings": {"name": "TARGET-01", "profile": {"mode": "old"}},
+            "identity": {"serial": "TARGET", "eth_mac": "00:11:22:33:44:66"},
+        },
+    ]
+    app.state.control_settings = copy.deepcopy(source_settings)
+    app.state.control_device_ip = "192.0.2.10"
+    app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
+    network_calls = []
+
+    async def should_not_contact_device(*args, **kwargs):
+        network_calls.append(args)
+        raise AssertionError("profile plan contacted a device")
+
+    monkeypatch.setattr(app_module, "get_device_report_with_login", should_not_contact_device)
+
+    response = client.post(
+        "/profile-plan",
+        json={"devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}]},
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["all_targets_profile_compatible"] is False
+    assert response.json()["targets"] == [
+        {
+            "ip": "192.0.2.11",
+            "magewell_id": "TARGET-01",
+            "serial": "TARGET",
+            "eth_mac": "00:11:22:33:44:66",
+            "fleet_id": None,
+            "current_settings_sha256": settings_fingerprint(
+                {"name": "TARGET-01", "profile": {"mode": "old"}}
+            ),
+            "profile_compatible": False,
+            "compatibility_reason": "target schema is missing source profile settings: bridge",
+        }
+    ]
+    assert network_calls == []
+
+
+def test_profile_plan_rejects_incomplete_cached_identity_before_network_access(monkeypatch) -> None:
+    source_settings = {"name": "SOURCE-01", "profile": {"mode": "camera"}}
+    app.state.devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "SOURCE-01",
+            "settings": source_settings,
+            "identity": {"serial": "SOURCE", "eth_mac": "00:11:22:33:44:55"},
+        },
+        {
+            "ip": "192.0.2.11",
+            "name": "TARGET-01",
+            "settings": {"name": "TARGET-01", "profile": {"mode": "old"}},
+            "identity_error": "identity unavailable",
+        },
+    ]
+    app.state.control_settings = copy.deepcopy(source_settings)
+    app.state.control_device_ip = "192.0.2.10"
+    app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
+    before_devices = copy.deepcopy(app.state.devices)
+    network_calls = []
+
+    async def should_not_contact_device(*args, **kwargs):
+        network_calls.append(args)
+        raise AssertionError("incomplete profile plan contacted a device")
+
+    monkeypatch.setattr(app_module, "get_device_report_with_login", should_not_contact_device)
+
+    response = client.post(
+        "/profile-plan",
+        json={"devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}]},
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 409
+    assert "identity is unavailable" in response.json()["detail"]
+    assert network_calls == []
+    assert app.state.devices == before_devices
 
 
 def test_device_settings_are_not_returned_to_the_browser() -> None:
