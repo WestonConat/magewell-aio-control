@@ -1,13 +1,14 @@
 # Magewell AIO Control
 
 Magewell AIO Control is a local Next.js and FastAPI utility for discovering Magewell
-Ultra Encode AIO devices, reading one device as a control-settings source, and applying
-settings to explicitly selected targets. It is intended for a supervised local-network
-maintenance window, not as an unattended fleet service.
+Ultra Encode AIO devices, reading one device as a control-settings source, applying
+settings to explicitly selected targets, and planning guarded bulk device naming. It is
+intended for a supervised local-network maintenance window, not as an unattended fleet
+service.
 
-The application is safe by default: it uses a loopback-only subnet, never scans on page
-load, and rejects every device-write request unless the operator explicitly enables the
-write boundary and confirms the target set.
+The application is safe by default: it uses a loopback-only subnet and never scans on page
+load. Profile writes require the device-write boundary; Naming uses a reviewed, identity-bound
+plan plus the operator's explicit in-app confirmation.
 
 ## Prerequisites
 
@@ -83,7 +84,7 @@ NEXT_PUBLIC_BACKEND_URL=http://127.0.0.1:8000 npm --prefix frontend run dev
 | `MAGEWELL_PASSWORD` | empty | Required before any real device report read or write; never commit it. |
 | `MAGEWELL_OLD_PASSWORD` | empty | Temporary rotation input; inject only into the disposable backend process and never store it. |
 | `ENABLE_CREDENTIAL_ROTATION` | `false` | Separate lock for one-device-at-a-time password rotation; cannot be enabled with Camera-profile writes. |
-| `ENABLE_DEVICE_WRITES` | `false` | Camera-profile write boundary. Never enable it together with credential rotation. |
+| `ENABLE_DEVICE_WRITES` | `false` | Device configuration write boundary for profile settings. Never enable it together with credential rotation. Naming is authorized by its reviewed plan and explicit in-app confirmation. |
 | `ENABLE_FIRMWARE_UPDATES` | `false` | Single-device firmware boundary. Camera-profile writes and credential rotation must remain locked. |
 | `MAX_SCAN_HOSTS` | `1024` | Maximum hosts in one requested scan; hard ceiling is 4096. |
 | `MAX_UPDATE_DEVICES` | `100` | Maximum unique targets in one write request; hard ceiling is 500. |
@@ -99,7 +100,7 @@ writes also require the UI's `X-Magewell-Operator-Intent: confirmed` header, and
 requests from origins outside `ALLOWED_ORIGINS` are rejected before device network access.
 The header is an intent/CSRF guard, not a secret or a replacement for the write lock.
 
-Embedded-baseline and CSV writes are disabled. Every supported write starts from a
+Embedded-baseline and CSV *settings* writes are disabled. Every supported profile write starts from a
 deep-copied settings payload read from an operator-selected live control device. Target-
 local identity, management-network, recording-path, and asset-inventory settings are
 preserved from each target's successful scan report. The backend rejects schema-mismatched
@@ -113,20 +114,50 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Manual device scan | Sends read-only ping, login, and report requests inside `ALLOWED_SUBNET`. |
 | Select control source | Freezes a deep copy of the already-read live settings and returns its SHA-256; no device write. |
 | Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
-| Verify target | Performs up to three read-only report checks over a two-second settle window and compares SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write or mutation retry. |
+| Verify target | Performs up to six read-only report checks over a ten-second settle window and compares SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write or mutation retry. |
 | Credential inventory | Authenticates each responder with the new credential first, then the old credential; no device write. |
 | Rotate one credential | Uses the authenticated admin `set-passwd` API exactly once, then verifies device identity with the new credential. |
 | Firmware preflight | Reads one device's identity, hardware, firmware, settings fingerprint, running state, and stream activity. |
 | Update one firmware target | Uploads one exact-hash `.mwf`, starts one install, waits through reboot, and verifies identity and firmware. Neither mutation is retried. |
 | CSV baseline update | Rejected; the embedded baseline is not an authorized write source. |
+| Naming plan | Builds a reviewed rename plan from the latest successful scan; no device write. |
+| Rename batch | Reads and identity-checks each target, submits the authenticated Magewell `set-name` call exactly once, then performs an immediate readback followed by up to five more read-only checks over a ten-second settle window. Only after the display name is visible, if supported recorder-name fields need changes, it submits one `import-settings` call to reset them (`dir-name` becomes `NAME_REC`; `prefix-name` becomes `NAME_`) and uses the same bounded readback window for the final settings. These are two non-atomic device calls; neither mutation is retried. A stop reports the verified versus uncertain stage and submits no later target. |
 
-Writes require all of the following: `ENABLE_DEVICE_WRITES=true`, valid runtime
-credentials, an explicit UI confirmation, and a validated non-empty target set. Only one
-write batch can run at a time. The mutation call is intentionally not retried, preventing
-an ambiguous response from causing a silent second submission. After an accepted write,
-the UI locks target changes and further writes until the operator runs its read-only
-verification. Verification stops on the first mismatch or read error and reports each
-device's expected and actual fingerprint.
+Profile writes require `ENABLE_DEVICE_WRITES=true`, valid runtime credentials, an explicit UI
+confirmation, and a validated non-empty target set. Naming instead requires valid runtime
+credentials, a fresh reviewed identity-bound plan, and explicit in-app confirmation; it does
+not require restarting the backend to set a development write flag. Only one mutation batch can
+run at a time. The mutation call is intentionally not retried, preventing an ambiguous response
+from causing a silent second submission. Naming refuses to run while firmware updates or
+credential rotation are armed.
+
+## Naming devices
+
+Open **Naming** in the local app after a fresh scan. Build one of two reviewable plans:
+
+- **Fleet-journal prefix:** select devices and enter a prefix. Each target's two-digit
+  suffix is derived only from the committed `backend/fleet_journal.csv` serial+Ethernet-MAC
+  pair, so an IP move cannot renumber it. For example, the device journaled as `AIO-01`
+  becomes `ENCODER-01`, while `AIO-13` becomes `ENCODER-13`.
+- **CSV mapping:** upload a UTF-8 CSV exported from Excel or Google Sheets with exactly
+  `ip,new_name` or `current_name,new_name` headers. Existing-name mappings must resolve
+  to exactly one device in the latest scan.
+
+The plan rejects duplicate targets or new names, a CSV name whose suffix does not match the
+device's journaled ID, collisions with devices not in the plan, failed scan reports,
+unrecognized serial/MAC pairs, out-of-subnet targets, and plans above `MAX_UPDATE_DEVICES`.
+Review every IP/current-name/new-name pair and recording-value count. The write button
+is available when the plan is ready; the operator's confirmation is the authorization to submit it.
+New names must use [Magewell's exact `set-name` contract](https://magewell.com/api-docs/ultra-encode-api/general/set-name.html):
+1–32 characters, only letters, numbers, spaces, and `._-+'[](),`, with no leading or trailing
+space. On confirmation the backend re-reads every target, checks its serial/MAC identity and
+settings fingerprint against the plan, submits `set-name` once, and immediately reads back the
+display name before it makes any recorder-settings import. If recorder fields require changes, it then submits one
+`import-settings` call and reads back the final full settings. The calls cannot be atomic. Any
+failed submission or read-back stops the remaining targets, reports the exact submitted,
+not-submitted, and fully verified counts plus the stage that is uncertain, and requires a fresh
+scan and fresh plan before any next run. Do not retry the stopped plan; recover or inspect that
+one device first.
 
 Credential rotation has a separate `ENABLE_CREDENTIAL_ROTATION` lock and accepts exactly
 one target per request. A fresh mixed-credential inventory classifies devices as `old`,

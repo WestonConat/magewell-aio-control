@@ -21,11 +21,11 @@ export default function NavMenu() {
         </li>
         <li className={styles.menuItem}>
           <Link
-            href="/bulk-update"
-            className={pathname === "/bulk-update" ? styles.active : undefined}
-            aria-current={pathname === "/bulk-update" ? "page" : undefined}
+            href="/naming"
+            className={pathname === "/naming" ? styles.active : undefined}
+            aria-current={pathname === "/naming" ? "page" : undefined}
           >
-            CSV tools
+            Naming
           </Link>
         </li>
       </ul>

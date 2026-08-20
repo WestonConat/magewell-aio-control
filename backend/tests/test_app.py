@@ -21,6 +21,8 @@ from backend.app import (
     settings_fingerprint,
     validate_scan_network,
 )
+from backend.fleet_journal import current_name_matches_fleet_id
+from backend.naming import build_rename_settings, validate_new_name
 from backend.settings_merge import get_bulk_update_settings
 
 os.environ.setdefault("ALLOWED_SUBNET", "192.0.2.0/24")
@@ -29,6 +31,20 @@ os.environ.setdefault("ENABLE_DEVICE_WRITES", "false")
 
 client = TestClient(app)
 OPERATOR_HEADERS = {"X-Magewell-Operator-Intent": OPERATOR_INTENT_VALUE}
+
+
+@pytest.mark.parametrize(
+    ("name", "fleet_id"),
+    [
+        ("AIO-16-Oceanside C", "AIO-16"),
+        ("FOUR_SEASONS_CISO_AIO-07", "AIO-07"),
+        ("BH-KN3-AIO-30", "AIO-30"),
+        ("aio-02-pulse-room-110", "AIO-02"),
+    ],
+)
+def test_current_name_recognizes_authoritative_fleet_token(name: str, fleet_id: str) -> None:
+    assert current_name_matches_fleet_id(name, fleet_id)
+    assert not current_name_matches_fleet_id(name, "AIO-31")
 
 
 def test_health_reports_safe_write_boundary() -> None:
@@ -217,6 +233,472 @@ def test_live_profile_preserves_target_local_settings() -> None:
     assert target["rec-channels"][0]["dir-name"] == "TARGET-01"
 
 
+def test_rename_settings_changes_only_name_and_recording_values() -> None:
+    before = {
+        "name": "ENCODER-01",
+        "profile": {"mode": "camera"},
+        "rec-channels": [
+            {"dir-name": "ENCODER-01_REC", "prefix-name": "ENCODER-01_"},
+            {"dir-name": "unrelated", "prefix-name": "VID"},
+        ],
+        "eth": {"ip": "192.0.2.10"},
+    }
+
+    updated, changes = build_rename_settings(before, "ENCODER-01", "STAGE-01")
+
+    assert updated["name"] == "STAGE-01"
+    assert updated["profile"] == before["profile"]
+    assert updated["eth"] == before["eth"]
+    assert updated["rec-channels"] == [
+        {"dir-name": "STAGE-01_REC", "prefix-name": "STAGE-01_"},
+        {"dir-name": "STAGE-01_REC", "prefix-name": "STAGE-01_"},
+    ]
+    assert [change["path"] for change in changes] == [
+        "rec-channels.0.dir-name",
+        "rec-channels.0.prefix-name",
+        "rec-channels.1.dir-name",
+        "rec-channels.1.prefix-name",
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "A",
+        "A" * 32,
+        "Stage 01",
+        "NAME._-+'[](),",
+    ],
+)
+def test_rename_name_validation_accepts_only_official_set_name_contract(value: str) -> None:
+    assert validate_new_name(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "A" * 33, " leading", "trailing ", "slash/name", "name!", "name\nnext"],
+)
+def test_rename_name_validation_rejects_outside_official_set_name_contract(value: str) -> None:
+    with pytest.raises(ValueError):
+        validate_new_name(value)
+
+
+def test_set_name_call_uses_authenticated_official_endpoint_without_retry() -> None:
+    requests: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def json(self) -> dict[str, int]:
+            return {"result": 0}
+
+    class FakeRequest:
+        async def __aenter__(self) -> FakeResponse:
+            return FakeResponse()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class FakeSession:
+        def get(self, url: str, *, params: dict[str, str], headers: dict[str, str]) -> FakeRequest:
+            requests.append({"url": url, "params": params, "headers": headers})
+            return FakeRequest()
+
+    result = asyncio.run(
+        app_module.set_name_call(FakeSession(), "192.0.2.10", "STAGE-01", "session-cookie", "OLD-A")
+    )
+
+    assert result == {"result": 0}
+    assert requests == [
+        {
+            "url": "http://192.0.2.10/usapi",
+            "params": {"method": "set-name", "name": "STAGE-01"},
+            "headers": {"Cookie": "session-cookie"},
+        }
+    ]
+
+
+def test_rename_plan_uses_journal_ids_and_rejects_name_collisions() -> None:
+    app.state.devices = [
+        {
+            "ip": "192.0.2.11",
+            "name": "B",
+            "settings": {"name": "B", "rec-channels": []},
+            "identity": {
+                "serial": "B313230505229",
+                "eth_mac": "d0:c8:57:81:c8:f5",
+                "fleet_id": "AIO-02",
+            },
+        },
+        {
+            "ip": "192.0.2.10",
+            "name": "A",
+            "settings": {"name": "A", "rec-channels": []},
+            "identity": {
+                "serial": "B313230202253",
+                "eth_mac": "d0:c8:57:81:58:86",
+                "fleet_id": "AIO-01",
+            },
+        },
+        {
+            "ip": "192.0.2.12",
+            "name": "KEEP_13",
+            "settings": {"name": "KEEP_13", "rec-channels": []},
+            "identity": {
+                "serial": "B313230505230",
+                "eth_mac": "d0:c8:57:81:99:23",
+                "fleet_id": "AIO-13",
+            },
+        },
+    ]
+    response = client.post(
+        "/rename-plan",
+        json={
+            "prefix": "STAGE",
+            "device_ips": ["192.0.2.11", "192.0.2.10"],
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 200
+    assert [(item["ip"], item["new_name"]) for item in response.json()["targets"]] == [
+        ("192.0.2.11", "STAGE-02"),
+        ("192.0.2.10", "STAGE-01"),
+    ]
+    app.state.devices[2]["name"] = "STAGE-01"
+    app.state.devices[2]["settings"]["name"] = "STAGE-01"
+    collision = client.post(
+        "/rename-plan",
+        json={"mappings": [{"ip": "192.0.2.10", "new_name": "STAGE-01"}]},
+        headers=OPERATOR_HEADERS,
+    )
+    assert collision.status_code == 400
+    assert "collides" in collision.json()["detail"]
+
+
+def test_rename_execute_requires_operator_confirmation_before_device_network_access() -> None:
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": "does-not-matter", "confirm": False},
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Explicit rename confirmation is required."
+
+
+def test_rename_execute_rejects_conflicting_armed_effect_modes(monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_FIRMWARE_UPDATES", "true")
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": "does-not-matter", "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Naming cannot run while Firmware updates are armed."
+
+
+def test_rename_execute_is_sequential_verified_and_not_resubmittable(monkeypatch) -> None:
+    before = {
+        "192.0.2.10": {
+            "name": "OLD-A",
+            "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+        },
+        "192.0.2.11": {
+            "name": "OLD-B",
+            "rec-channels": [{"dir-name": "OLD-B_REC", "prefix-name": "OLD-B_"}],
+        },
+    }
+    app.state.devices = [
+        {
+            "ip": ip,
+            "name": settings["name"],
+            "settings": settings,
+            "identity": {
+                "serial": "B313230202253" if ip.endswith("10") else "B313230505229",
+                "eth_mac": "d0:c8:57:81:58:86" if ip.endswith("10") else "d0:c8:57:81:c8:f5",
+                "fleet_id": "AIO-01" if ip.endswith("10") else "AIO-02",
+            },
+        }
+        for ip, settings in before.items()
+    ]
+    plan_response = client.post(
+        "/rename-plan",
+        json={"prefix": "STAGE", "device_ips": list(before)},
+        headers=OPERATOR_HEADERS,
+    )
+    assert plan_response.status_code == 200
+    plan_id = plan_response.json()["plan_id"]
+    after_display_name = {
+        "192.0.2.10": {
+            "name": "STAGE-01",
+            "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+        },
+        "192.0.2.11": {
+            "name": "STAGE-02",
+            "rec-channels": [{"dir-name": "OLD-B_REC", "prefix-name": "OLD-B_"}],
+        },
+    }
+    after = {
+        "192.0.2.10": {
+            "name": "STAGE-01",
+            "rec-channels": [{"dir-name": "STAGE-01_REC", "prefix-name": "STAGE-01_"}],
+        },
+        "192.0.2.11": {
+            "name": "STAGE-02",
+            "rec-channels": [{"dir-name": "STAGE-02_REC", "prefix-name": "STAGE-02_"}],
+        },
+    }
+    report_calls: dict[str, int] = {ip: 0 for ip in before}
+    mutations: list[str] = []
+
+    async def report(_session, ip, *_args, **_kwargs):
+        report_calls[ip] += 1
+        return [before[ip], after_display_name[ip], after[ip]][report_calls[ip] - 1]
+
+    async def login(*_args, **_kwargs):
+        return "session-cookie"
+
+    async def identity(_session, ip, *_args, **_kwargs):
+        return next(device["identity"] for device in app.state.devices if device["ip"] == ip)
+
+    async def set_name(_session, ip, name, *_args):
+        mutations.append(f"set-name:{ip}")
+        assert name == after[ip]["name"]
+        return {"result": 0}
+
+    async def import_settings(_session, ip, payload, *_args):
+        mutations.append(f"import-settings:{ip}")
+        assert payload == after[ip]
+        return {"result": 0}
+
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "false")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "get_device_identity_with_login", identity)
+    monkeypatch.setattr(app_module, "login_device", login)
+    monkeypatch.setattr(app_module, "set_name_call", set_name)
+    monkeypatch.setattr(app_module, "import_settings_call", import_settings)
+
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": plan_id, "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+    assert response.status_code == 200
+    assert [result["status"] for result in response.json()["results"]] == [
+        "renamed-and-verified",
+        "renamed-and-verified",
+    ]
+    assert response.json()["outcome"] == "fully-successful"
+    assert response.json()["summary"] == {
+        "target_count": 2,
+        "submitted_count": 2,
+        "fully_verified_count": 2,
+        "not_submitted_count": 0,
+    }
+    assert [result["display_name_readback_attempts"] for result in response.json()["results"]] == [
+        1,
+        1,
+    ]
+    assert [
+        result["recording_names_readback_attempts"] for result in response.json()["results"]
+    ] == [
+        1,
+        1,
+    ]
+    assert mutations == [
+        "set-name:192.0.2.10",
+        "import-settings:192.0.2.10",
+        "set-name:192.0.2.11",
+        "import-settings:192.0.2.11",
+    ]
+    retry = client.post(
+        "/rename-execute",
+        json={"plan_id": plan_id, "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+    assert retry.status_code == 409
+    assert "fresh plan" in retry.json()["detail"]
+
+
+def test_rename_execute_allows_read_only_settle_without_resubmitting_mutations(monkeypatch) -> None:
+    before = {
+        "name": "OLD-A",
+        "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+    }
+    after_display_name = {
+        "name": "STAGE-01",
+        "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+    }
+    after = {
+        "name": "STAGE-01",
+        "rec-channels": [{"dir-name": "STAGE-01_REC", "prefix-name": "STAGE-01_"}],
+    }
+    app.state.devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": before["name"],
+            "settings": before,
+            "identity": {
+                "serial": "B313230202253",
+                "eth_mac": "d0:c8:57:81:58:86",
+                "fleet_id": "AIO-01",
+            },
+        }
+    ]
+    plan_id = client.post(
+        "/rename-plan",
+        json={"prefix": "STAGE", "device_ips": ["192.0.2.10"]},
+        headers=OPERATOR_HEADERS,
+    ).json()["plan_id"]
+    reports = iter([before, before, after_display_name, after_display_name, after])
+    mutations: list[str] = []
+    sleeps: list[int] = []
+
+    async def report(*_args, **_kwargs):
+        return next(reports)
+
+    async def identity(*_args, **_kwargs):
+        return app.state.devices[0]["identity"]
+
+    async def login(*_args, **_kwargs):
+        return "session-cookie"
+
+    async def set_name(*_args, **_kwargs):
+        mutations.append("set-name")
+        return {"result": 0}
+
+    async def import_settings(*_args, **_kwargs):
+        mutations.append("import-settings")
+        return {"result": 0}
+
+    async def no_wait(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "get_device_identity_with_login", identity)
+    monkeypatch.setattr(app_module, "login_device", login)
+    monkeypatch.setattr(app_module, "set_name_call", set_name)
+    monkeypatch.setattr(app_module, "import_settings_call", import_settings)
+    monkeypatch.setattr(app_module.asyncio, "sleep", no_wait)
+
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": plan_id, "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["status"] == "renamed-and-verified"
+    assert result["display_name_readback_attempts"] == 2
+    assert result["recording_names_readback_attempts"] == 2
+    assert mutations == ["set-name", "import-settings"]
+    assert sleeps == [2, 2]
+
+
+def test_rename_execute_stops_after_recording_submission_and_marks_remaining_unsubmitted(
+    monkeypatch,
+) -> None:
+    before = {
+        "192.0.2.10": {
+            "name": "OLD-A",
+            "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+        },
+        "192.0.2.11": {
+            "name": "OLD-B",
+            "rec-channels": [{"dir-name": "OLD-B_REC", "prefix-name": "OLD-B_"}],
+        },
+    }
+    app.state.devices = [
+        {
+            "ip": ip,
+            "name": settings["name"],
+            "settings": settings,
+            "identity": {
+                "serial": "B313230202253" if ip.endswith("10") else "B313230505229",
+                "eth_mac": "d0:c8:57:81:58:86" if ip.endswith("10") else "d0:c8:57:81:c8:f5",
+                "fleet_id": "AIO-01" if ip.endswith("10") else "AIO-02",
+            },
+        }
+        for ip, settings in before.items()
+    ]
+    plan_id = client.post(
+        "/rename-plan",
+        json={"prefix": "STAGE", "device_ips": list(before)},
+        headers=OPERATOR_HEADERS,
+    ).json()["plan_id"]
+    display_reads = {
+        "192.0.2.10": {
+            "name": "STAGE-01",
+            "rec-channels": [{"dir-name": "OLD-A_REC", "prefix-name": "OLD-A_"}],
+        }
+    }
+    report_calls: dict[str, int] = {ip: 0 for ip in before}
+    mutations: list[str] = []
+
+    async def report(_session, ip, *_args, **_kwargs):
+        report_calls[ip] += 1
+        if ip == "192.0.2.10" and report_calls[ip] == 2:
+            return display_reads[ip]
+        return before[ip]
+
+    async def identity(_session, ip, *_args, **_kwargs):
+        return next(device["identity"] for device in app.state.devices if device["ip"] == ip)
+
+    async def login(*_args, **_kwargs):
+        return "session-cookie"
+
+    async def set_name(_session, ip, *_args):
+        mutations.append(f"set-name:{ip}")
+        return {"result": 0}
+
+    async def failed_import(_session, ip, *_args):
+        mutations.append(f"import-settings:{ip}")
+        raise TimeoutError("ambiguous import response")
+
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "false")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "get_device_identity_with_login", identity)
+    monkeypatch.setattr(app_module, "login_device", login)
+    monkeypatch.setattr(app_module, "set_name_call", set_name)
+    monkeypatch.setattr(app_module, "import_settings_call", failed_import)
+
+    response = client.post(
+        "/rename-execute",
+        json={"plan_id": plan_id, "confirm": True},
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["outcome"] == "stopped-partial"
+    assert body["fresh_scan_and_plan_required"] is True
+    assert body["summary"] == {
+        "target_count": 2,
+        "submitted_count": 1,
+        "fully_verified_count": 0,
+        "not_submitted_count": 1,
+    }
+    assert body["results"][0]["status"] == "stopped-after-recording-name-submission"
+    assert body["results"][0]["display_name_status"] == "verified"
+    assert body["results"][0]["recording_names_status"] == "uncertain"
+    assert body["results"][1]["status"] == "not-submitted"
+    assert mutations == ["set-name:192.0.2.10", "import-settings:192.0.2.10"]
+    fresh_scan_required = client.post(
+        "/rename-plan",
+        json={"prefix": "STAGE", "device_ips": list(before)},
+        headers=OPERATOR_HEADERS,
+    )
+    assert fresh_scan_required.status_code == 409
+    assert "fresh device scan" in fresh_scan_required.json()["detail"]
+
+
 def test_live_profile_rejects_schema_or_identity_mismatch() -> None:
     with pytest.raises(ValueError, match="identity"):
         get_bulk_update_settings("TARGET-01", {"name": "CONTROL"}, {"name": "OTHER"})
@@ -282,6 +764,33 @@ def test_device_settings_are_not_returned_to_the_browser() -> None:
             }
         ]
     ) == [{"ip": "192.0.2.10", "name": "ENCODER-01"}]
+
+
+def test_unmatched_journal_identity_is_visible_without_settings() -> None:
+    assert public_device_list(
+        [
+            {
+                "ip": "192.0.2.10",
+                "name": "ENCODER-01",
+                "settings": {"wifi": [{"passwd": "secret"}]},
+                "identity": {
+                    "serial": "B313230202253",
+                    "eth_mac": "d0:c8:57:81:58:86",
+                    "fleet_id": "",
+                },
+                "identity_error": "Device serial/MAC pair is not present in the fleet journal.",
+            }
+        ]
+    ) == [
+        {
+            "ip": "192.0.2.10",
+            "name": "ENCODER-01",
+            "serial": "B313230202253",
+            "eth_mac": "d0:c8:57:81:58:86",
+            "fleet_id": "",
+            "identity_error": "Device serial/MAC pair is not present in the fleet journal.",
+        }
+    ]
 
 
 def test_loopback_default_is_a_valid_single_host(monkeypatch) -> None:
