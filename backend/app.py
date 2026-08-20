@@ -49,6 +49,10 @@ class PushUpdateRequest(BaseModel):
     confirm: bool = False
 
 
+class KnownIpDiscoveryRequest(BaseModel):
+    ips: list[str] = Field(min_length=1)
+
+
 class VerifyTargetRequest(BaseModel):
     device: DeviceSelection
 
@@ -199,6 +203,34 @@ def validate_device_ip(raw_ip: str) -> str:
             detail=f"Device IP {raw_ip} is outside ALLOWED_SUBNET ({allowed_network}).",
         )
     return str(address)
+
+
+def validate_known_discovery_ips(ips: list[str]) -> list[str]:
+    """Validate an explicit read-only discovery target list before touching the LAN."""
+    if len(ips) > get_max_scan_hosts():
+        raise HTTPException(
+            status_code=400,
+            detail=(f"At most {get_max_scan_hosts()} explicit addresses may be scanned at once."),
+        )
+    allowed_network = get_allowed_network()
+    normalized_ips = []
+    seen: set[str] = set()
+    for raw_ip in ips:
+        normalized_ip = validate_device_ip(raw_ip)
+        address = ipaddress.ip_address(normalized_ip)
+        if allowed_network.prefixlen <= 30 and address in {
+            allowed_network.network_address,
+            allowed_network.broadcast_address,
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Device IP {normalized_ip} is a network or broadcast address.",
+            )
+        if normalized_ip in seen:
+            raise HTTPException(status_code=400, detail=f"Duplicate device IP: {normalized_ip}")
+        seen.add(normalized_ip)
+        normalized_ips.append(normalized_ip)
+    return normalized_ips
 
 
 def ensure_unique_devices(devices: list[DeviceSelection]) -> None:
@@ -617,6 +649,65 @@ async def sem_ping(
         return await ping_magewell(session, ip, timeout)
 
 
+async def discover_devices_from_ips(
+    ips: list[str],
+    username: str,
+    password: str,
+    per_ip_timeout: float,
+    max_concurrent: int,
+    settings_timeout: float,
+) -> list[dict[str, Any]]:
+    """Replace the cached inventory using only already-validated read-only targets."""
+    app.state.control_settings = None
+    app.state.control_device_ip = None
+    app.state.control_settings_sha256 = None
+    connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        ping_results = await asyncio.gather(
+            *(sem_ping(semaphore, session, ip, per_ip_timeout) for ip in ips)
+        )
+        magewell_ips = [ip for ip, matched in zip(ips, ping_results) if matched]
+        report_results = await asyncio.gather(
+            *(
+                get_device_report_with_login(session, ip, username, password, settings_timeout)
+                for ip in magewell_ips
+            ),
+            return_exceptions=True,
+        )
+        identity_results = await asyncio.gather(
+            *(
+                get_device_identity_with_login(session, ip, username, password, settings_timeout)
+                for ip, report in zip(magewell_ips, report_results)
+                if not isinstance(report, Exception)
+            ),
+            return_exceptions=True,
+        )
+
+    devices = []
+    successful_identity_results = iter(identity_results)
+    for ip, report in zip(magewell_ips, report_results):
+        if isinstance(report, Exception):
+            error = safe_device_error(report)
+            logger.error("Could not read settings from %s: %s", ip, error)
+            devices.append({"ip": ip, "name": "", "settings": {}, "read_error": error})
+        else:
+            device = {"ip": ip, "name": report.get("name", ""), "settings": report}
+            identity = next(successful_identity_results)
+            if isinstance(identity, Exception):
+                device["identity_error"] = safe_device_error(identity)
+            else:
+                device["identity"] = identity
+                if not identity["fleet_id"]:
+                    device["identity_error"] = (
+                        "Device serial/MAC pair is not present in the fleet journal."
+                    )
+            devices.append(device)
+    app.state.devices = devices
+    app.state.rename_scan_required = False
+    return devices
+
+
 async def push_update_for_device(
     session: aiohttp.ClientSession,
     magewell_ip: str,
@@ -685,66 +776,29 @@ async def discover_magewell(
     if not rescan and getattr(app.state, "devices", None):
         return {"devices": public_device_list(app.state.devices), "cached": True}
 
-    app.state.control_settings = None
-    app.state.control_device_ip = None
-    app.state.control_settings_sha256 = None
     ips = [str(ip) for ip in network.hosts()]
-    connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
-    semaphore = asyncio.Semaphore(max_concurrent)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        ping_results = await asyncio.gather(
-            *(sem_ping(semaphore, session, ip, per_ip_timeout) for ip in ips)
-        )
-        magewell_ips = [ip for ip, matched in zip(ips, ping_results) if matched]
-        report_results = await asyncio.gather(
-            *(
-                get_device_report_with_login(
-                    session,
-                    ip,
-                    username,
-                    password,
-                    settings_timeout,
-                )
-                for ip in magewell_ips
-            ),
-            return_exceptions=True,
-        )
-        identity_results = await asyncio.gather(
-            *(
-                get_device_identity_with_login(
-                    session,
-                    ip,
-                    username,
-                    password,
-                    settings_timeout,
-                )
-                for ip, report in zip(magewell_ips, report_results)
-                if not isinstance(report, Exception)
-            ),
-            return_exceptions=True,
-        )
+    devices = await discover_devices_from_ips(
+        ips, username, password, per_ip_timeout, max_concurrent, settings_timeout
+    )
+    return {"devices": public_device_list(devices), "cached": False}
 
-    devices = []
-    successful_identity_results = iter(identity_results)
-    for ip, report in zip(magewell_ips, report_results):
-        if isinstance(report, Exception):
-            error = safe_device_error(report)
-            logger.error("Could not read settings from %s: %s", ip, error)
-            devices.append({"ip": ip, "name": "", "settings": {}, "read_error": error})
-        else:
-            device = {"ip": ip, "name": report.get("name", ""), "settings": report}
-            identity = next(successful_identity_results)
-            if isinstance(identity, Exception):
-                device["identity_error"] = safe_device_error(identity)
-            else:
-                device["identity"] = identity
-                if not identity["fleet_id"]:
-                    device["identity_error"] = (
-                        "Device serial/MAC pair is not present in the fleet journal."
-                    )
-            devices.append(device)
-    app.state.devices = devices
-    app.state.rename_scan_required = False
+
+@app.post("/discover-known-ips")
+async def discover_known_ips(
+    request: KnownIpDiscoveryRequest,
+    per_ip_timeout: float = Query(1.0, gt=0, le=5),
+    max_concurrent: int = Query(50, ge=1, le=200),
+    settings_timeout: float = Query(2.0, gt=0, le=10),
+    x_magewell_operator_intent: str | None = Header(None),
+    origin: str | None = Header(None),
+) -> dict[str, Any]:
+    """Read only the explicitly supplied, validated IPv4 targets."""
+    require_operator_intent(x_magewell_operator_intent, origin)
+    ips = validate_known_discovery_ips(request.ips)
+    username, password = get_device_credentials()
+    devices = await discover_devices_from_ips(
+        ips, username, password, per_ip_timeout, max_concurrent, settings_timeout
+    )
     return {"devices": public_device_list(devices), "cached": False}
 
 

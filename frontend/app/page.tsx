@@ -53,6 +53,8 @@ export default function HomePage() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [error, setError] = useState("");
   const [subnet, setSubnet] = useState("");
+  const [scanMode, setScanMode] = useState<"subnet" | "known-ips">("subnet");
+  const [knownIps, setKnownIps] = useState("");
   const [selectedControlDevice, setSelectedControlDevice] =
     useState<Device | null>(null);
   const [selectedPushIps, setSelectedPushIps] = useState<string[]>([]);
@@ -139,11 +141,52 @@ export default function HomePage() {
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (scanMode === "known-ips") {
+      void scanKnownIps();
+      return;
+    }
     setControlMessage("");
     setControlSource(null);
     setSelectedControlDevice(null);
     setPushMessage("");
     void scanNetwork(subnet, true);
+  };
+
+  const scanKnownIps = async () => {
+    const ips = knownIps.split(/[\s,]+/).filter(Boolean);
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`${backendBaseUrl}/discover-known-ips`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Magewell-Operator-Intent": "confirmed",
+        },
+        body: JSON.stringify({ ips }),
+      });
+      if (!response.ok) throw new Error(await apiError(response));
+      const data = await response.json();
+      setDevices(data.devices || []);
+      setSelectedPushIps([]);
+      setPushResults([]);
+      setVerificationMessage("");
+      setVerificationResults([]);
+      setVerificationRequired(false);
+      setControlSource(null);
+      setSelectedControlDevice(null);
+      setControlMessage(
+        "Known-IP inventory loaded; select a live source to continue.",
+      );
+    } catch (scanError) {
+      setError(
+        scanError instanceof Error
+          ? scanError.message
+          : "Known-IP discovery failed.",
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSelectToggle = (device: Device) => {
@@ -372,26 +415,63 @@ export default function HomePage() {
       <section className={styles.scanPanel}>
         <form onSubmit={handleSubmit} className={styles.scanForm}>
           <div className={styles.fieldGroup}>
-            <label htmlFor="subnet" className={styles.label}>
-              Discovery subnet
+            <label htmlFor="scan-mode" className={styles.label}>
+              Discovery mode
             </label>
-            <input
-              id="subnet"
-              type="text"
-              value={subnet}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                setSubnet(event.target.value)
+            <select
+              id="scan-mode"
+              value={scanMode}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                setScanMode(event.target.value as "subnet" | "known-ips")
               }
               className={styles.input}
-              placeholder="Enter an allowed CIDR"
-            />
+            >
+              <option value="subnet">Allowed CIDR scan</option>
+              <option value="known-ips">Known IPv4 list (read only)</option>
+            </select>
+          </div>
+          <div className={styles.fieldGroup}>
+            <label
+              htmlFor={scanMode === "subnet" ? "subnet" : "known-ips"}
+              className={styles.label}
+            >
+              {scanMode === "subnet"
+                ? "Discovery subnet"
+                : "Known IPv4 addresses"}
+            </label>
+            {scanMode === "subnet" ? (
+              <input
+                id="subnet"
+                type="text"
+                value={subnet}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  setSubnet(event.target.value)
+                }
+                className={styles.input}
+                placeholder="Enter an allowed CIDR"
+              />
+            ) : (
+              <textarea
+                id="known-ips"
+                value={knownIps}
+                onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+                  setKnownIps(event.target.value)
+                }
+                className={`${styles.input} ${styles.knownIpsInput}`}
+                placeholder="192.0.2.10, 192.0.2.11"
+              />
+            )}
           </div>
           <button
             type="submit"
             className={styles.primaryButton}
             disabled={loading}
           >
-            {loading ? "Scanning…" : "Scan network"}
+            {loading
+              ? "Scanning…"
+              : scanMode === "subnet"
+                ? "Scan network"
+                : "Read known IPs"}
           </button>
         </form>
         <span className={styles.inventoryCount}>
@@ -405,7 +485,11 @@ export default function HomePage() {
 
       {loading ? (
         <section className={styles.loadingState}>
-          <p>Scanning {subnet}…</p>
+          <p>
+            {scanMode === "subnet"
+              ? `Scanning ${subnet}…`
+              : "Reading known IPs…"}
+          </p>
         </section>
       ) : devices.length > 0 ? (
         <>
