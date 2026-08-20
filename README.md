@@ -139,6 +139,27 @@ source/target identities and deterministic fingerprints, never raw settings, cre
 URLs, or cookies. Generate a fresh plan after any source, target, inventory, or configuration
 change; an old plan is deliberately not retained or reused by the backend.
 
+## AIO-16 video-color experiment adapter
+
+The repository contains a fixture-gated backend adapter for one reviewed AIO-16 laboratory
+experiment: brightness `0 -> 1`, while retaining contrast `100`, saturation `100`, and hue `0`.
+It is intentionally **not** an API route, a UI control, a generic field-override feature, or a
+device runner. It opens no network connection itself. A separately authorized live-run owner must
+perform fresh authenticated identity, `get-info`, `get-status`, and report checks, hold the existing
+mutation lock, and provide the authenticated single-call transport outside this adapter.
+
+The adapter accepts only the documented AIO-16 fixture cohort and its evidence fingerprints. It
+rejects stale identity/configuration, unsafe status bits, ranges, baseline, and report shape before
+an executable intent is exposed. It canonicalizes the caller-supplied ephemeral settings and
+video-color subtree itself before comparing their SHA-256 values; raw reports are never returned or
+stored. Its only forward request parameters are
+`set-video-color`, `contrast=100`, `brightness=1`, `saturation=100`, and `hue=0`; it never retries.
+After a definitive response, the caller must provide a read-back with no unrelated settings drift
+and a clear HDMI/SDI mapping. Only then is the inverse brightness `1 -> 0` intent eligible. Any
+timeout, non-success, malformed response, stale state, drift, or ambiguous mapping is
+`uncertain-high-risk`: the adapter locks itself and never auto-restores. The documented vendor
+contract is [Ultra Encode AIO API: set-video-color](https://entest.magewell.com/api-docs/ultra-encode-aio-api/ultra-encode-aio-api-en_US.pdf).
+
 ## Durable profile-run receipts
 
 Each accepted profile-settings write creates a separate, redacted durable receipt with a fresh
