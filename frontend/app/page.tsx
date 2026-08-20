@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import DeviceGrid from "@/components/DeviceGrid";
 import { Device } from "@/components/DeviceCard";
 import styles from "./page.module.css";
@@ -34,6 +34,34 @@ interface ControlSource {
   incompatible_targets: Array<{ ip: string; reason: string }>;
 }
 
+interface ProfilePlanTarget {
+  ip: string;
+  magewell_id: string;
+  serial: string;
+  eth_mac: string;
+  fleet_id?: string | null;
+  current_settings_sha256: string;
+  profile_compatible: boolean;
+  compatibility_reason?: string;
+  expected_settings_sha256?: string;
+}
+
+interface ProfilePlan {
+  plan_id: string;
+  inventory_sha256: string;
+  source: {
+    ip: string;
+    magewell_id: string;
+    serial: string;
+    eth_mac: string;
+    fleet_id?: string | null;
+    settings_sha256: string;
+  };
+  targets: ProfilePlanTarget[];
+  all_targets_profile_compatible: boolean;
+  mode: "read-only-compatibility-plan";
+}
+
 async function apiError(response: Response): Promise<string> {
   try {
     const body = await response.json();
@@ -62,6 +90,10 @@ export default function HomePage() {
   const [controlSource, setControlSource] = useState<ControlSource | null>(
     null,
   );
+  const [profilePlan, setProfilePlan] = useState<ProfilePlan | null>(null);
+  const [profilePlanMessage, setProfilePlanMessage] = useState("");
+  const [profilePlanInProgress, setProfilePlanInProgress] = useState(false);
+  const profilePlanGeneration = useRef(0);
   const [pushMessage, setPushMessage] = useState("");
   const [pushResults, setPushResults] = useState<UpdateResult[]>([]);
   const [pushInProgress, setPushInProgress] = useState(false);
@@ -87,6 +119,13 @@ export default function HomePage() {
   const selectedDevices = devices.filter((device) =>
     selectedPushIps.includes(device.ip),
   );
+
+  const invalidateProfilePlan = (message = "") => {
+    profilePlanGeneration.current += 1;
+    setProfilePlan(null);
+    setProfilePlanInProgress(false);
+    setProfilePlanMessage(message);
+  };
 
   useEffect(() => {
     const loadSafeStatus = async () => {
@@ -117,6 +156,7 @@ export default function HomePage() {
     setDevices([]);
     setSelectedPushIps([]);
     setPushResults([]);
+    invalidateProfilePlan();
     setVerificationMessage("");
     setVerificationResults([]);
     setVerificationRequired(false);
@@ -156,6 +196,7 @@ export default function HomePage() {
     const ips = knownIps.split(/[\s,]+/).filter(Boolean);
     setLoading(true);
     setError("");
+    invalidateProfilePlan("Profile plan invalidated: discovery was requested.");
     try {
       const response = await fetch(`${backendBaseUrl}/discover-known-ips`, {
         method: "POST",
@@ -212,6 +253,9 @@ export default function HomePage() {
         ? previous.filter((ip) => ip !== device.ip)
         : [...previous, device.ip],
     );
+    invalidateProfilePlan(
+      "Profile plan invalidated: target selection changed.",
+    );
   };
 
   const handleSelectAll = () => {
@@ -223,6 +267,9 @@ export default function HomePage() {
     }
     setSelectedPushIps(eligibleTargetIps);
     setPushMessage("");
+    invalidateProfilePlan(
+      "Profile plan invalidated: target selection changed.",
+    );
   };
 
   const handleClearAll = () => {
@@ -234,6 +281,9 @@ export default function HomePage() {
     }
     setSelectedPushIps([]);
     setPushMessage("");
+    invalidateProfilePlan(
+      "Profile plan invalidated: target selection changed.",
+    );
   };
 
   const handleConfirmControl = async () => {
@@ -253,6 +303,7 @@ export default function HomePage() {
       setVerificationMessage("");
       setVerificationResults([]);
       setVerificationRequired(false);
+      invalidateProfilePlan("Profile plan invalidated: source changed.");
       setSelectedPushIps((previous) => {
         const compatibleIps = new Set(data.compatible_target_ips);
         return previous.filter((ip) => compatibleIps.has(ip));
@@ -268,6 +319,60 @@ export default function HomePage() {
       );
     } finally {
       setSelectedControlDevice(null);
+    }
+  };
+
+  const generateProfilePlan = async () => {
+    if (!controlSource) {
+      setProfilePlanMessage("Select and freeze the live control source first.");
+      return;
+    }
+    const devicesToPlan = devices
+      .filter((device) => selectedPushIps.includes(device.ip))
+      .map((device) => ({ ip: device.ip, magewell_id: device.name }));
+    if (devicesToPlan.length === 0) {
+      setProfilePlanMessage(
+        "Select at least one non-source target to preview.",
+      );
+      return;
+    }
+    const generation = profilePlanGeneration.current + 1;
+    profilePlanGeneration.current = generation;
+    setProfilePlan(null);
+    setProfilePlanInProgress(true);
+    setProfilePlanMessage(
+      "Building a read-only compatibility plan from cached state...",
+    );
+    try {
+      const response = await fetch(`${backendBaseUrl}/profile-plan`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Magewell-Operator-Intent": "confirmed",
+        },
+        body: JSON.stringify({ devices: devicesToPlan }),
+      });
+      if (!response.ok) throw new Error(await apiError(response));
+      const data: ProfilePlan = await response.json();
+      if (profilePlanGeneration.current !== generation) return;
+      setProfilePlan(data);
+      setProfilePlanMessage(
+        data.all_targets_profile_compatible
+          ? "Read-only plan is current. It does not simulate or authorize an import."
+          : "Read-only plan is current, but one or more targets are not profile-compatible.",
+      );
+    } catch (planError) {
+      if (profilePlanGeneration.current !== generation) return;
+      setProfilePlan(null);
+      setProfilePlanMessage(
+        `Profile plan unavailable: ${
+          planError instanceof Error ? planError.message : "unknown error"
+        }`,
+      );
+    } finally {
+      if (profilePlanGeneration.current === generation) {
+        setProfilePlanInProgress(false);
+      }
     }
   };
 
@@ -291,6 +396,10 @@ export default function HomePage() {
       setPushMessage("Update cancelled; no write request was sent.");
       return;
     }
+
+    invalidateProfilePlan(
+      "Profile plan invalidated: a device write was requested; generate a fresh plan after verification.",
+    );
 
     const devicesToUpdate = devices
       .filter((device) => selectedPushIps.includes(device.ip))
@@ -533,6 +642,19 @@ export default function HomePage() {
 
             <div className={styles.actionRow}>
               <button
+                onClick={generateProfilePlan}
+                className={styles.secondaryButton}
+                disabled={
+                  profilePlanInProgress ||
+                  !controlSource ||
+                  selectedPushIps.length === 0
+                }
+              >
+                {profilePlanInProgress
+                  ? "Planning…"
+                  : "Preview profile plan (read only)"}
+              </button>
+              <button
                 onClick={pushUpdates}
                 className={styles.primaryButton}
                 disabled={
@@ -564,10 +686,63 @@ export default function HomePage() {
               </button>
             </div>
 
-            {(pushMessage || verificationMessage) && (
+            {(profilePlanMessage || pushMessage || verificationMessage) && (
               <div className={styles.resultMessages}>
+                {profilePlanMessage && <p>{profilePlanMessage}</p>}
                 {pushMessage && <p>{pushMessage}</p>}
                 {verificationMessage && <p>{verificationMessage}</p>}
+              </div>
+            )}
+            {profilePlan && (
+              <div className={styles.resultsList}>
+                <div className={styles.resultRow}>
+                  <span>
+                    <strong>
+                      Read-only plan {shortHash(profilePlan.plan_id)}
+                    </strong>
+                    <small>
+                      Source {profilePlan.source.magewell_id} (
+                      {profilePlan.source.ip})
+                    </small>
+                  </span>
+                  <span
+                    className={
+                      profilePlan.all_targets_profile_compatible
+                        ? styles.resultVerified
+                        : styles.resultStopped
+                    }
+                  >
+                    {profilePlan.all_targets_profile_compatible
+                      ? "Compatible"
+                      : "Review targets"}
+                  </span>
+                  <small>
+                    Source {shortHash(profilePlan.source.settings_sha256)} ·
+                    Inventory {shortHash(profilePlan.inventory_sha256)}
+                  </small>
+                </div>
+                {profilePlan.targets.map((target) => (
+                  <div className={styles.resultRow} key={`plan-${target.ip}`}>
+                    <span>
+                      <strong>{target.magewell_id}</strong>
+                      <small>{target.ip}</small>
+                    </span>
+                    <span
+                      className={
+                        target.profile_compatible
+                          ? styles.resultVerified
+                          : styles.resultStopped
+                      }
+                    >
+                      {target.profile_compatible ? "Compatible" : "Blocked"}
+                    </span>
+                    <small>
+                      {target.profile_compatible
+                        ? `Current ${shortHash(target.current_settings_sha256)} · Expected ${shortHash(target.expected_settings_sha256)}`
+                        : target.compatibility_reason}
+                    </small>
+                  </div>
+                ))}
               </div>
             )}
             {(pushResults.length > 0 || verificationResults.length > 0) && (

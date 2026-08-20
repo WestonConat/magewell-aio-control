@@ -49,6 +49,10 @@ class PushUpdateRequest(BaseModel):
     confirm: bool = False
 
 
+class ProfilePlanRequest(BaseModel):
+    devices: list[DeviceSelection] = Field(min_length=1)
+
+
 class KnownIpDiscoveryRequest(BaseModel):
     ips: list[str] = Field(min_length=1)
 
@@ -245,6 +249,55 @@ def ensure_unique_devices(devices: list[DeviceSelection]) -> None:
             status_code=400,
             detail=f"At most {get_max_update_devices()} devices may be updated at once.",
         )
+
+
+def profile_plan_identity(device: dict[str, Any]) -> dict[str, Any]:
+    """Return the redacted identity binding required for a cached profile plan."""
+    identity = device.get("identity")
+    if device.get("identity_error") or not isinstance(identity, dict):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Latest-scan identity is unavailable for {device.get('ip', 'the device')}.",
+        )
+    serial = identity.get("serial")
+    eth_mac = identity.get("eth_mac")
+    if not serial or not eth_mac:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Latest-scan identity is incomplete for {device.get('ip', 'the device')}.",
+        )
+    return {
+        "ip": device["ip"],
+        "magewell_id": device.get("name", ""),
+        "serial": serial,
+        "eth_mac": eth_mac,
+        "fleet_id": identity.get("fleet_id"),
+    }
+
+
+def profile_plan_inventory_fingerprint(cached_devices: list[dict[str, Any]]) -> str:
+    """Fingerprint accepted scan identities without exposing device settings."""
+    inventory = []
+    for device in sorted(cached_devices, key=lambda item: item.get("ip", "")):
+        identity = device.get("identity")
+        inventory.append(
+            {
+                "ip": device.get("ip", ""),
+                "magewell_id": device.get("name", ""),
+                "identity": (
+                    {
+                        "serial": identity.get("serial"),
+                        "eth_mac": identity.get("eth_mac"),
+                        "fleet_id": identity.get("fleet_id"),
+                    }
+                    if isinstance(identity, dict)
+                    else None
+                ),
+                "identity_error": bool(device.get("identity_error")),
+                "read_error": bool(device.get("read_error")),
+            }
+        )
+    return settings_fingerprint({"inventory": inventory})
 
 
 EFFECT_MODE_FLAGS = {
@@ -1423,6 +1476,113 @@ async def set_control(device: DeviceSelection) -> dict[str, Any]:
         "settings_sha256": fingerprint,
         "compatible_target_ips": compatible_target_ips,
         "incompatible_targets": incompatible_targets,
+    }
+
+
+@app.post("/profile-plan")
+async def profile_plan(
+    request: ProfilePlanRequest,
+    x_magewell_operator_intent: str | None = Header(None),
+    origin: str | None = Header(None),
+) -> dict[str, Any]:
+    """Build an ephemeral, read-only profile compatibility and fingerprint plan.
+
+    This endpoint intentionally reads only accepted application state.  It does not
+    obtain device credentials, open a device session, or retain a plan for later use.
+    """
+    require_operator_intent(x_magewell_operator_intent, origin)
+    ensure_unique_devices(request.devices)
+    control_settings = getattr(app.state, "control_settings", None)
+    source_ip = getattr(app.state, "control_device_ip", None)
+    source_settings_sha256 = getattr(app.state, "control_settings_sha256", None)
+    if not control_settings or not source_ip or not source_settings_sha256:
+        raise HTTPException(
+            status_code=400,
+            detail="Select and freeze a control device before generating a profile plan.",
+        )
+    if settings_fingerprint(control_settings) != source_settings_sha256:
+        raise HTTPException(
+            status_code=409,
+            detail="Frozen control settings changed; select the control device again.",
+        )
+
+    cached_devices = {item["ip"]: item for item in getattr(app.state, "devices", [])}
+    source_device = cached_devices.get(source_ip)
+    if not source_device or source_device.get("read_error") or not source_device.get("settings"):
+        raise HTTPException(
+            status_code=409,
+            detail="The frozen control device is no longer available from the latest scan.",
+        )
+    source_identity = profile_plan_identity(source_device)
+    current_source_settings = get_bulk_update_settings(
+        source_identity["magewell_id"], source_device["settings"], source_device["settings"]
+    )
+    if settings_fingerprint(current_source_settings) != source_settings_sha256:
+        raise HTTPException(
+            status_code=409,
+            detail="Latest-scan source configuration changed; select the control device again.",
+        )
+
+    target_plans = []
+    for selected_device in sorted(request.devices, key=lambda device: device.ip):
+        if selected_device.ip == source_ip:
+            raise HTTPException(
+                status_code=400,
+                detail="The control source cannot be included in a profile plan target set.",
+            )
+        cached_device = cached_devices.get(selected_device.ip)
+        if (
+            not cached_device
+            or cached_device.get("read_error")
+            or not cached_device.get("settings")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Every profile-plan target must have a successful latest-scan report; "
+                    f"invalid: {selected_device.ip}"
+                ),
+            )
+        if selected_device.magewell_id != cached_device.get("name"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Profile-plan target identity mismatch: {selected_device.ip}",
+            )
+        identity = profile_plan_identity(cached_device)
+        target_plan: dict[str, Any] = {
+            **identity,
+            "current_settings_sha256": settings_fingerprint(cached_device["settings"]),
+        }
+        try:
+            expected_settings = get_bulk_update_settings(
+                selected_device.magewell_id,
+                control_settings,
+                cached_device["settings"],
+            )
+        except ValueError as exc:
+            target_plan["profile_compatible"] = False
+            target_plan["compatibility_reason"] = str(exc)
+        else:
+            target_plan["profile_compatible"] = True
+            target_plan["expected_settings_sha256"] = settings_fingerprint(expected_settings)
+        target_plans.append(target_plan)
+
+    inventory_fingerprint = profile_plan_inventory_fingerprint(list(cached_devices.values()))
+    plan_binding = {
+        "version": 1,
+        "inventory_sha256": inventory_fingerprint,
+        "source": {**source_identity, "settings_sha256": source_settings_sha256},
+        "targets": target_plans,
+    }
+    return {
+        "plan_id": settings_fingerprint(plan_binding),
+        "inventory_sha256": inventory_fingerprint,
+        "source": plan_binding["source"],
+        "targets": target_plans,
+        "all_targets_profile_compatible": all(
+            target["profile_compatible"] for target in target_plans
+        ),
+        "mode": "read-only-compatibility-plan",
     }
 
 
