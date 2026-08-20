@@ -94,6 +94,13 @@
   border-color: var(--accent);
 }
 
+.knownIpsInput {
+  min-height: 38px;
+  height: 64px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
 .primaryButton,
 .secondaryButton,
 .textButton,

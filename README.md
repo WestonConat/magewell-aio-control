@@ -51,7 +51,7 @@ must be treated as exposed and rotated before a live run.
    ```
 
 5. Open <http://127.0.0.1:3000>. The UI does not scan until the operator clicks
-   **Scan Network (read only)**.
+   **Scan Network (read only)** or **Read known IPs**.
 
 Stop the application with `Ctrl-C`, or with `docker compose down` if it was started
 detached.
@@ -111,7 +111,8 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Operation | Device effect |
 | --- | --- |
 | `GET /healthz`, `GET /local-subnet` | Local state only; no LAN access. |
-| Manual device scan | Sends read-only ping, login, and report requests inside `ALLOWED_SUBNET`. |
+| Manual CIDR device scan | Sends read-only ping, login, and report requests inside `ALLOWED_SUBNET`. |
+| Known-IP device discovery | Sends the same read-only ping, login, identity, and report requests only to an operator-supplied, de-duplicated list of IPv4 addresses inside `ALLOWED_SUBNET`; invalid, duplicate, or oversized input is rejected before device network access. |
 | Select control source | Freezes a deep copy of the already-read live settings and returns its SHA-256; no device write. |
 | Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
 | Verify target | Performs up to six read-only report checks over a ten-second settle window and compares SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write or mutation retry. |

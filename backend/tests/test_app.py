@@ -189,6 +189,139 @@ def test_scan_host_cap_is_enforced(monkeypatch) -> None:
     assert "MAX_SCAN_HOSTS" in response.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    ("ips", "max_scan_hosts", "status_code"),
+    [
+        ([], None, 422),
+        (["not-an-ip"], None, 400),
+        (["192.0.2.10", "192.0.2.10"], None, 400),
+        (["198.51.100.10"], None, 400),
+        (["192.0.2.0"], None, 400),
+        (["192.0.2.255"], None, 400),
+        (["192.0.2.10", "192.0.2.11"], "1", 400),
+    ],
+)
+def test_known_ip_discovery_rejects_invalid_input_before_network_or_state_change(
+    monkeypatch, ips: list[str], max_scan_hosts: str | None, status_code: int
+) -> None:
+    if max_scan_hosts:
+        monkeypatch.setenv("MAX_SCAN_HOSTS", max_scan_hosts)
+    app.state.devices = [{"ip": "192.0.2.99", "name": "PREVIOUS", "settings": {}}]
+    app.state.control_settings = {"name": "PREVIOUS"}
+    app.state.control_device_ip = "192.0.2.99"
+    app.state.control_settings_sha256 = "previous-fingerprint"
+    app.state.rename_scan_required = True
+    network_calls = []
+
+    async def should_not_contact_device(*args, **kwargs):
+        network_calls.append(args)
+        raise AssertionError("invalid known-IP input contacted a device")
+
+    monkeypatch.setattr(app_module, "ping_magewell", should_not_contact_device)
+
+    response = client.post("/discover-known-ips", json={"ips": ips}, headers=OPERATOR_HEADERS)
+
+    assert response.status_code == status_code
+    assert network_calls == []
+    assert app.state.devices == [{"ip": "192.0.2.99", "name": "PREVIOUS", "settings": {}}]
+    assert app.state.control_settings == {"name": "PREVIOUS"}
+    assert app.state.control_device_ip == "192.0.2.99"
+    assert app.state.control_settings_sha256 == "previous-fingerprint"
+    assert app.state.rename_scan_required is True
+
+
+def test_known_ip_discovery_requires_intent_before_network_access(monkeypatch) -> None:
+    network_calls = []
+
+    async def should_not_contact_device(*args, **kwargs):
+        network_calls.append(args)
+        raise AssertionError("request without intent contacted a device")
+
+    monkeypatch.setattr(app_module, "ping_magewell", should_not_contact_device)
+
+    response = client.post("/discover-known-ips", json={"ips": ["192.0.2.10"]})
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Explicit operator intent is required."
+    assert network_calls == []
+
+
+def test_known_ip_discovery_reads_only_supplied_targets_and_replaces_safe_state(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MAGEWELL_USERNAME", "Admin")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "password")
+    app.state.devices = [{"ip": "192.0.2.99", "name": "PREVIOUS", "settings": {}}]
+    app.state.control_settings = {"name": "PREVIOUS"}
+    app.state.control_device_ip = "192.0.2.99"
+    app.state.control_settings_sha256 = "previous-fingerprint"
+    app.state.rename_scan_required = True
+    pinged_ips = []
+    report_ips = []
+    identity_ips = []
+
+    async def successful_ping(_session, ip, _timeout):
+        pinged_ips.append(ip)
+        return True
+
+    async def report(_session, ip, *_args, **_kwargs):
+        report_ips.append(ip)
+        return {
+            "name": "AIO-01" if ip.endswith(".10") else "AIO-02",
+            "wifi": [{"passwd": "secret"}],
+        }
+
+    async def identity(_session, ip, *_args, **_kwargs):
+        identity_ips.append(ip)
+        return {
+            "serial": "B313230202253" if ip.endswith(".10") else "B313231201181",
+            "eth_mac": "d0:c8:57:81:58:86" if ip.endswith(".10") else "d0:c8:57:81:c8:f5",
+            "fleet_id": "AIO-01" if ip.endswith(".10") else "AIO-02",
+        }
+
+    monkeypatch.setattr(app_module, "ping_magewell", successful_ping)
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    monkeypatch.setattr(app_module, "get_device_identity_with_login", identity)
+
+    response = client.post(
+        "/discover-known-ips",
+        json={"ips": ["192.0.2.10", "192.0.2.11"]},
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert pinged_ips == ["192.0.2.10", "192.0.2.11"]
+    assert report_ips == ["192.0.2.10", "192.0.2.11"]
+    assert identity_ips == ["192.0.2.10", "192.0.2.11"]
+    assert response.json() == {
+        "cached": False,
+        "devices": [
+            {
+                "ip": "192.0.2.10",
+                "name": "AIO-01",
+                "serial": "B313230202253",
+                "eth_mac": "d0:c8:57:81:58:86",
+                "fleet_id": "AIO-01",
+                "name_journal_mismatch": False,
+            },
+            {
+                "ip": "192.0.2.11",
+                "name": "AIO-02",
+                "serial": "B313231201181",
+                "eth_mac": "d0:c8:57:81:c8:f5",
+                "fleet_id": "AIO-02",
+                "name_journal_mismatch": False,
+            },
+        ],
+    }
+    assert app.state.control_settings is None
+    assert app.state.control_device_ip is None
+    assert app.state.control_settings_sha256 is None
+    assert app.state.rename_scan_required is False
+    assert [device["ip"] for device in app.state.devices] == ["192.0.2.10", "192.0.2.11"]
+    assert app.state.devices[0]["settings"]["wifi"][0]["passwd"] == "secret"
+
+
 def test_live_profile_preserves_target_local_settings() -> None:
     source = {
         "name": "CONTROL",
