@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
@@ -23,6 +24,7 @@ from .fleet_journal import (
     required_name,
 )
 from .naming import build_rename_settings, validate_new_name
+from .run_receipts import ProfileRunReceiptStore, ReceiptSafetyError, receipt_sha256
 from .settings_merge import get_bulk_update_settings
 
 logging.basicConfig(
@@ -59,6 +61,7 @@ class KnownIpDiscoveryRequest(BaseModel):
 
 class VerifyTargetRequest(BaseModel):
     device: DeviceSelection
+    receipt_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 class CredentialRotationRequest(BaseModel):
@@ -275,6 +278,18 @@ def profile_plan_identity(device: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def profile_run_receipt_identity(device: dict[str, Any]) -> dict[str, Any]:
+    """Return the receipt's redacted identity fields without changing write eligibility."""
+    identity = device.get("identity") if isinstance(device.get("identity"), dict) else {}
+    return {
+        "ip": device.get("ip", ""),
+        "magewell_id": device.get("name", ""),
+        "serial": identity.get("serial"),
+        "eth_mac": identity.get("eth_mac"),
+        "fleet_id": identity.get("fleet_id"),
+    }
+
+
 def profile_plan_inventory_fingerprint(cached_devices: list[dict[str, Any]]) -> str:
     """Fingerprint accepted scan identities without exposing device settings."""
     inventory = []
@@ -298,6 +313,55 @@ def profile_plan_inventory_fingerprint(cached_devices: list[dict[str, Any]]) -> 
             }
         )
     return settings_fingerprint({"inventory": inventory})
+
+
+def profile_run_receipt_for_push(
+    *,
+    source_ip: str,
+    source_settings_sha256: str,
+    source_identity: dict[str, Any],
+    inventory_sha256: str,
+    target_payloads: list[tuple[DeviceSelection, dict[str, Any], str]],
+    cached_devices: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the only redacted shape allowed in durable profile-run storage."""
+    targets = []
+    for device, _, expected_settings_sha256 in target_payloads:
+        cached_device = cached_devices[device.ip]
+        targets.append(
+            {
+                **profile_run_receipt_identity(cached_device),
+                "current_settings_sha256": settings_fingerprint(cached_device["settings"]),
+                "expected_settings_sha256": expected_settings_sha256,
+                "profile_compatible": True,
+                # A pre-effect journal cannot know whether the import was accepted.
+                # Conservatively surface that ambiguity until a terminal outcome arrives.
+                "mutation": {"status": "not-started", "reason_code": "intent-recorded"},
+                "verification": {"status": "not-requested", "reason_code": "write-pending"},
+                "risk_state": "uncertain-high-risk",
+            }
+        )
+    binding = {
+        "schema_version": 1,
+        "kind": "magewell-profile-run-receipt",
+        "effect_mode": "camera-profile",
+        "inventory_sha256": inventory_sha256,
+        "source": {**source_identity, "settings_sha256": source_settings_sha256},
+        "targets": targets,
+    }
+    return {
+        **binding,
+        # Each write gets a distinct durable record; the accepted input binding remains
+        # deterministic and is retained separately for comparison and audit.
+        "receipt_id": uuid.uuid4().hex,
+        "binding_sha256": receipt_sha256(binding),
+        "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def get_profile_run_receipt_store() -> ProfileRunReceiptStore:
+    """Create the local-only receipt store from the configured durable root."""
+    return ProfileRunReceiptStore()
 
 
 EFFECT_MODE_FLAGS = {
@@ -777,6 +841,17 @@ async def push_update_for_device(
             md5_hash(password),
             magewell_id,
         )
+    except Exception as exc:
+        error = safe_device_error(exc)
+        logger.error("Update login failed for %s (%s): %s", magewell_id, magewell_ip, error)
+        return {
+            "ip": magewell_ip,
+            "magewell_id": magewell_id,
+            "status": "failed",
+            "reason_code": "login-failed",
+            "error": error,
+        }
+    try:
         await import_settings_call(session, magewell_ip, settings, cookie_header, magewell_id)
         return {"ip": magewell_ip, "magewell_id": magewell_id, "status": "updated"}
     except Exception as exc:
@@ -786,6 +861,11 @@ async def push_update_for_device(
             "ip": magewell_ip,
             "magewell_id": magewell_id,
             "status": "failed",
+            "reason_code": (
+                "mutation-response-unknown"
+                if isinstance(exc, aiohttp.ClientError | TimeoutError)
+                else "device-rejected"
+            ),
             "error": error,
         }
 
@@ -1628,8 +1708,24 @@ async def push_updates(
             detail=f"Write target identity mismatch: {', '.join(identity_mismatches)}",
         )
     source_ip = getattr(app.state, "control_device_ip", None)
+    source_settings_sha256 = getattr(
+        app.state, "control_settings_sha256", None
+    ) or settings_fingerprint(control_settings)
     if source_ip and any(device.ip == source_ip for device in request.devices):
         raise HTTPException(status_code=400, detail="The control source cannot be a write target.")
+    source_device = cached_devices.get(source_ip) if source_ip else None
+    source_identity = profile_run_receipt_identity(
+        source_device or {"ip": source_ip or "", "name": ""}
+    )
+    if source_device and source_device.get("settings"):
+        current_source_settings = get_bulk_update_settings(
+            source_identity["magewell_id"], source_device["settings"], source_device["settings"]
+        )
+        if settings_fingerprint(current_source_settings) != source_settings_sha256:
+            raise HTTPException(
+                status_code=409,
+                detail="Latest-scan source configuration changed; select the control device again.",
+            )
     target_payloads: list[tuple[DeviceSelection, dict[str, Any], str]] = []
     for device in request.devices:
         try:
@@ -1644,10 +1740,22 @@ async def push_updates(
                 detail=f"Write target {device.ip} is not profile-compatible: {exc}",
             ) from None
         target_payloads.append((device, payload, settings_fingerprint(payload)))
+    receipt = profile_run_receipt_for_push(
+        source_ip=source_ip or "",
+        source_settings_sha256=source_settings_sha256,
+        source_identity=source_identity,
+        inventory_sha256=profile_plan_inventory_fingerprint(list(cached_devices.values())),
+        target_payloads=target_payloads,
+        cached_devices=cached_devices,
+    )
     lock = get_mutation_lock()
     if lock.locked():
         raise HTTPException(status_code=409, detail="Another device update is already running.")
     async with lock:
+        try:
+            get_profile_run_receipt_store().reserve_and_record_intent(receipt)
+        except ReceiptSafetyError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
         connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
         async with aiohttp.ClientSession(connector=connector) as session:
             mutation_results = await asyncio.gather(
@@ -1664,18 +1772,79 @@ async def push_updates(
                 )
             )
     results = []
-    for mutation_result, (_, _, expected_fingerprint) in zip(mutation_results, target_payloads):
+    receipt_targets = list(receipt["targets"])
+    for receipt_target, mutation_result, (_, _, expected_fingerprint) in zip(
+        receipt_targets, mutation_results, target_payloads
+    ):
+        status = mutation_result["status"]
+        reason_code = mutation_result.get(
+            "reason_code", "import-accepted" if status == "updated" else "device-request-failed"
+        )
+        receipt_target["mutation"] = {
+            "status": status,
+            "reason_code": reason_code,
+        }
+        receipt_target["risk_state"] = (
+            "verification-pending"
+            if status == "updated"
+            else (
+                "uncertain-high-risk"
+                if reason_code == "mutation-response-unknown"
+                else "no-device-effect-confirmed"
+            )
+        )
         results.append(
             {
                 **mutation_result,
                 "expected_settings_sha256": expected_fingerprint,
             }
         )
+    try:
+        get_profile_run_receipt_store().record_mutation_outcomes(receipt, receipt_targets)
+    except ReceiptSafetyError as exc:
+        logger.error("Profile-run receipt finalization failed for %s", receipt["receipt_id"])
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Device write results are uncertain because durable receipt finalization failed; "
+                "stop and inspect devices before retrying."
+            ),
+        ) from exc
     return {
         "source_ip": source_ip,
-        "source_settings_sha256": getattr(app.state, "control_settings_sha256", None),
+        "source_settings_sha256": source_settings_sha256,
+        "receipt_id": receipt["receipt_id"],
         "results": results,
     }
+
+
+@app.get("/profile-run-receipts")
+async def list_profile_run_receipts(limit: int = Query(20, ge=1, le=100)) -> dict[str, Any]:
+    """Inspect redacted, local receipt summaries without any device network access."""
+    try:
+        receipts = get_profile_run_receipt_store().list_receipts()
+    except ReceiptSafetyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+    return {"receipts": receipts[:limit], "count": len(receipts)}
+
+
+@app.get("/profile-run-receipts/export-manifest")
+async def profile_run_receipt_export_manifest() -> dict[str, Any]:
+    """Return a local-export manifest; copying the volume remains a manual operator action."""
+    try:
+        return get_profile_run_receipt_store().export_manifest()
+    except (ReceiptSafetyError, OSError):
+        raise HTTPException(
+            status_code=503, detail="Profile-run receipt manifest is unavailable."
+        ) from None
+
+
+@app.get("/profile-run-receipts/{receipt_id}")
+async def get_profile_run_receipt(receipt_id: str) -> dict[str, Any]:
+    try:
+        return get_profile_run_receipt_store().get_receipt(receipt_id)
+    except ReceiptSafetyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
 
 
 @app.post("/verify-target")
@@ -1712,7 +1881,40 @@ async def verify_target(
             detail=f"Verification target is not profile-compatible: {exc}",
         ) from None
     expected = settings_fingerprint(expected_settings)
+    receipt_store: ProfileRunReceiptStore | None = None
+    if request.receipt_id:
+        try:
+            receipt_store = get_profile_run_receipt_store()
+            durable_receipt = receipt_store.get_receipt(request.receipt_id)
+            receipt_target = next(
+                (
+                    target
+                    for target in durable_receipt.get("targets", [])
+                    if target.get("ip") == ip
+                    and target.get("magewell_id") == request.device.magewell_id
+                ),
+                None,
+            )
+            if receipt_target is None:
+                raise ReceiptSafetyError(
+                    "Verification target does not match the durable profile-run receipt."
+                )
+            if receipt_target.get("mutation", {}).get("status") != "updated":
+                raise ReceiptSafetyError(
+                    "Receipt target was not confirmed as updated; no verification read was sent."
+                )
+            if receipt_target.get("verification", {}).get("status") != "not-requested":
+                raise ReceiptSafetyError(
+                    "Receipt verification was already recorded; no verification read was sent."
+                )
+            if receipt_target.get("expected_settings_sha256") != expected:
+                raise ReceiptSafetyError(
+                    "Receipt expected profile no longer matches the frozen source; no verification read was sent."
+                )
+        except ReceiptSafetyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
     connector = aiohttp.TCPConnector(ssl=False, family=socket.AF_INET)
+    verification_attempts = 0
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
             actual = ""
@@ -1734,8 +1936,49 @@ async def verify_target(
         logger.error(
             "Verification read failed for %s (%s): %s", request.device.magewell_id, ip, error
         )
+        if receipt_store and request.receipt_id:
+            try:
+                receipt_store.record_verification_outcome(
+                    request.receipt_id,
+                    ip=ip,
+                    magewell_id=request.device.magewell_id,
+                    verification={
+                        "status": "unavailable",
+                        "reason_code": "verification-read-failed",
+                        "attempts": verification_attempts,
+                    },
+                )
+            except ReceiptSafetyError as receipt_exc:
+                logger.error("Profile-run verification receipt could not be finalized for %s", ip)
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Verification read failed and durable receipt finalization also failed; "
+                        "stop and inspect devices."
+                    ),
+                ) from receipt_exc
         raise HTTPException(status_code=502, detail=error) from None
-    return {
+    if receipt_store and request.receipt_id:
+        try:
+            receipt_store.record_verification_outcome(
+                request.receipt_id,
+                ip=ip,
+                magewell_id=request.device.magewell_id,
+                verification={
+                    "status": "verified" if actual == expected else "mismatch",
+                    "reason_code": "matches-expected-profile"
+                    if actual == expected
+                    else "readback-mismatch",
+                    "attempts": verification_attempts,
+                    "actual_settings_sha256": actual,
+                },
+            )
+        except ReceiptSafetyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Verification completed but durable receipt finalization failed; stop and inspect devices.",
+            ) from exc
+    result = {
         "ip": ip,
         "magewell_id": request.device.magewell_id,
         "expected_settings_sha256": expected,
@@ -1743,6 +1986,9 @@ async def verify_target(
         "matches_expected_profile": actual == expected,
         "verification_attempts": verification_attempts,
     }
+    if request.receipt_id:
+        result["receipt_id"] = request.receipt_id
+    return result
 
 
 @app.post("/bulk-update")

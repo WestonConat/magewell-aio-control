@@ -3,6 +3,12 @@
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import DeviceGrid from "@/components/DeviceGrid";
 import { Device } from "@/components/DeviceCard";
+import {
+  isReceiptDisplaySafe,
+  receiptHasUncertainRisk,
+  receiptTargetSummary,
+  type ProfileRunReceipt,
+} from "./profileRunReceipts";
 import styles from "./page.module.css";
 
 const backendBaseUrl = (
@@ -103,6 +109,11 @@ export default function HomePage() {
   >([]);
   const [verificationInProgress, setVerificationInProgress] = useState(false);
   const [verificationRequired, setVerificationRequired] = useState(false);
+  const [activeReceiptId, setActiveReceiptId] = useState<string | null>(null);
+  const [profileRunReceipts, setProfileRunReceipts] = useState<
+    ProfileRunReceipt[]
+  >([]);
+  const [receiptMessage, setReceiptMessage] = useState("");
   const [writesEnabled, setWritesEnabled] = useState(false);
   const incompatibleTargetReasons = new Map(
     controlSource?.incompatible_targets.map((target) => [
@@ -125,6 +136,28 @@ export default function HomePage() {
     setProfilePlan(null);
     setProfilePlanInProgress(false);
     setProfilePlanMessage(message);
+  };
+
+  const loadProfileRunReceipts = async () => {
+    setReceiptMessage("Loading redacted local run receipts...");
+    try {
+      const response = await fetch(`${backendBaseUrl}/profile-run-receipts`);
+      if (!response.ok) throw new Error(await apiError(response));
+      const data = await response.json();
+      const receipts = (data.receipts || []).filter(isReceiptDisplaySafe);
+      setProfileRunReceipts(receipts);
+      setReceiptMessage(
+        data.count === receipts.length
+          ? data.count
+            ? `Showing ${Math.min(data.count, 20)} of ${data.count} local receipt${data.count === 1 ? "" : "s"}.`
+            : "No local profile-run receipts are available."
+          : "Receipt inspection withheld an unexpected non-redacted local record.",
+      );
+    } catch (receiptError) {
+      setReceiptMessage(
+        `Receipt inspection unavailable: ${receiptError instanceof Error ? receiptError.message : "unknown error"}`,
+      );
+    }
   };
 
   useEffect(() => {
@@ -151,6 +184,7 @@ export default function HomePage() {
 
   const scanNetwork = async (subnetToScan: string, forceRescan = false) => {
     if (!subnetToScan) return;
+    setActiveReceiptId(null);
     setLoading(true);
     setError("");
     setDevices([]);
@@ -194,6 +228,7 @@ export default function HomePage() {
 
   const scanKnownIps = async () => {
     const ips = knownIps.split(/[\s,]+/).filter(Boolean);
+    setActiveReceiptId(null);
     setLoading(true);
     setError("");
     invalidateProfilePlan("Profile plan invalidated: discovery was requested.");
@@ -288,6 +323,7 @@ export default function HomePage() {
 
   const handleConfirmControl = async () => {
     if (!selectedControlDevice) return;
+    setActiveReceiptId(null);
     try {
       const response = await fetch(`${backendBaseUrl}/set-control`, {
         method: "POST",
@@ -419,6 +455,8 @@ export default function HomePage() {
       if (!response.ok) throw new Error(await apiError(response));
       const data = await response.json();
       setPushResults(data.results || []);
+      setActiveReceiptId(data.receipt_id || null);
+      void loadProfileRunReceipts();
       const requiresReadBack = (data.results || []).some(
         (result: UpdateResult) => result.status === "updated",
       );
@@ -468,6 +506,7 @@ export default function HomePage() {
           },
           body: JSON.stringify({
             device: { ip: device.ip, magewell_id: device.name },
+            receipt_id: activeReceiptId || undefined,
           }),
         });
         if (!response.ok) throw new Error(await apiError(response));
@@ -505,6 +544,7 @@ export default function HomePage() {
         "Read-back stopped on the first mismatch or error. Keep writes stopped and investigate before retrying.",
       );
     }
+    if (activeReceiptId) void loadProfileRunReceipts();
     setVerificationInProgress(false);
   };
 
@@ -684,13 +724,24 @@ export default function HomePage() {
               >
                 {verificationInProgress ? "Verifying…" : "Verify read-back"}
               </button>
+              <button
+                onClick={() => void loadProfileRunReceipts()}
+                className={styles.secondaryButton}
+                disabled={pushInProgress || verificationInProgress}
+              >
+                Inspect local run receipts
+              </button>
             </div>
 
-            {(profilePlanMessage || pushMessage || verificationMessage) && (
+            {(profilePlanMessage ||
+              pushMessage ||
+              verificationMessage ||
+              receiptMessage) && (
               <div className={styles.resultMessages}>
                 {profilePlanMessage && <p>{profilePlanMessage}</p>}
                 {pushMessage && <p>{pushMessage}</p>}
                 {verificationMessage && <p>{verificationMessage}</p>}
+                {receiptMessage && <p>{receiptMessage}</p>}
               </div>
             )}
             {profilePlan && (
@@ -741,6 +792,34 @@ export default function HomePage() {
                         ? `Current ${shortHash(target.current_settings_sha256)} · Expected ${shortHash(target.expected_settings_sha256)}`
                         : target.compatibility_reason}
                     </small>
+                  </div>
+                ))}
+              </div>
+            )}
+            {profileRunReceipts.length > 0 && (
+              <div className={styles.resultsList}>
+                {profileRunReceipts.map((receipt) => (
+                  <div className={styles.resultRow} key={receipt.receipt_id}>
+                    <span>
+                      <strong>
+                        Durable receipt {shortHash(receipt.receipt_id)}
+                      </strong>
+                      <small>
+                        {receipt.source.magewell_id} ({receipt.source.ip}) ·{" "}
+                        {receipt.targets.length} target
+                        {receipt.targets.length === 1 ? "" : "s"}
+                      </small>
+                    </span>
+                    <span
+                      className={
+                        receiptHasUncertainRisk(receipt)
+                          ? styles.resultStopped
+                          : styles.resultVerified
+                      }
+                    >
+                      {receipt.run_state}
+                    </span>
+                    <small>{receiptTargetSummary(receipt)}</small>
                   </div>
                 ))}
               </div>

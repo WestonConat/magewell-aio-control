@@ -19,6 +19,7 @@ services:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     volumes:
       - magewell_firmware_recovery:/var/lib/magewell-firmware-recovery
+      - magewell_profile_run_receipts:/var/lib/magewell-profile-run-receipts
     healthcheck:
       test:
         - CMD
@@ -44,3 +45,4 @@ services:
 
 volumes:
   magewell_firmware_recovery:
+  magewell_profile_run_receipts:

@@ -23,6 +23,7 @@ typecheck:
 
 test:
   .venv/bin/pytest -q
+  npm --prefix frontend run test
 
 compose-check:
   docker compose config --quiet

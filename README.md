@@ -115,7 +115,8 @@ targets, returns the frozen source SHA-256, and rejects the control source as a 
 | Known-IP device discovery | Sends the same read-only ping, login, identity, and report requests only to an operator-supplied, de-duplicated list of IPv4 addresses inside `ALLOWED_SUBNET`; invalid, duplicate, or oversized input is rejected before device network access. |
 | Select control source | Freezes a deep copy of the already-read live settings and returns its SHA-256; no device write. |
 | Profile-plan receipt | Uses only the accepted cached scan and frozen source to show a redacted, ephemeral compatibility/fingerprint plan for the exact selected targets; it opens no device connection, simulates no import, authorizes no write, and is invalidated when inventory, source, target selection, or relevant configuration changes. |
-| Push selected settings | Calls Magewell `import-settings` once per explicitly selected, successfully read non-source target. |
+| Durable profile-run receipt | Reads only local durable receipt state. It exposes redacted run identities, fingerprints, mutation/verification status, and an export manifest; it never contacts a device or performs an export. |
+| Push selected settings | Reserves and fsyncs one redacted pre-effect receipt before calling Magewell `import-settings` once per explicitly selected, successfully read non-source target. It fails closed before any import if receipt capacity or durable storage is unavailable. |
 | Verify target | Performs up to six read-only report checks over a ten-second settle window and compares SHA-256 with that target's expected live-source profile plus preserved target-local settings; no device write or mutation retry. |
 | Credential inventory | Authenticates each responder with the new credential first, then the old credential; no device write. |
 | Rotate one credential | Uses the authenticated admin `set-passwd` API exactly once, then verifies device identity with the new credential. |
@@ -137,6 +138,42 @@ The profile-plan receipt is a read-only operator aid, not a write prerequisite. 
 source/target identities and deterministic fingerprints, never raw settings, credentials, device
 URLs, or cookies. Generate a fresh plan after any source, target, inventory, or configuration
 change; an old plan is deliberately not retained or reused by the backend.
+
+## Durable profile-run receipts
+
+Each accepted profile-settings write creates a separate, redacted durable receipt with a fresh
+server-side run ID; its accepted input binding is retained separately as a deterministic SHA-256.
+Receipts live in the
+Compose named volume `magewell_profile_run_receipts`, mounted only in the backend at
+`/var/lib/magewell-profile-run-receipts`. It is separate from firmware recovery because firmware
+recovery includes a raw settings backup. The backend owns the receipt root and monthly journal
+directories at mode `0700`; journal and current-summary files are mode `0600`.
+
+Before the first device import, the backend reserves storage for the pre-effect and terminal
+events, appends and fsyncs the intent, then writes bounded mutation and read-back outcomes. A
+receipt contains only deterministic identities/fleet metadata, source and target settings hashes,
+compatibility and outcome reason codes, bounded verification attempts, and a SHA-256 of each
+canonical journal event. It never stores raw settings, credentials, cookies, headers, URLs,
+device responses, query strings, or free-form device errors. Until a terminal outcome or
+read-back is recorded, the receipt visibly marks the target as `uncertain-high-risk`; do not
+retry based on an ambiguous device response.
+
+The monthly append-only JSONL journal is capped at 64 KiB per record and 10 MiB or 10,000
+records in total. Receipt data is retained for at least 30 days. Day 30 is a review trigger only:
+there is no automatic deletion, no delete API/UI, no individual pruning, and no notification,
+automatic backup, or external logging integration.
+
+Use **Inspect local run receipts** in the app to view the redacted current summaries. The local
+`GET /profile-run-receipts/export-manifest` endpoint provides the SHA-256, size, and record
+count for each journal segment. Export is intentionally manual and outside the repository:
+
+```bash
+docker compose cp backend:/var/lib/magewell-profile-run-receipts \
+  /private/tmp/magewell-profile-run-receipts
+```
+
+Treat every copied receipt as operationally sensitive identity metadata. The copy is a separate
+operator-managed artifact and is not automatically retained, synchronized, or deleted by this app.
 
 ## Naming devices
 
