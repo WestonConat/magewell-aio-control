@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend import app as app_module
+from backend import run_receipts
 from backend.app import (
     OPERATOR_INTENT_VALUE,
     PushUpdateRequest,
@@ -32,6 +33,12 @@ os.environ.setdefault("ENABLE_DEVICE_WRITES", "false")
 
 client = TestClient(app)
 OPERATOR_HEADERS = {"X-Magewell-Operator-Intent": OPERATOR_INTENT_VALUE}
+
+
+@pytest.fixture(autouse=True)
+def isolated_profile_run_receipt_root(monkeypatch, tmp_path) -> None:
+    """Keep durable-receipt tests local and disposable; never use a host volume."""
+    monkeypatch.setenv("PROFILE_RUN_RECEIPT_ROOT", str(tmp_path / "profile-run-receipts"))
 
 
 @pytest.mark.parametrize(
@@ -1423,6 +1430,275 @@ def test_control_source_cannot_be_a_write_target(monkeypatch) -> None:
     )
     assert response.status_code == 400
     assert response.json()["detail"] == "The control source cannot be a write target."
+
+
+def _configure_profile_write_receipt_state(monkeypatch) -> None:
+    monkeypatch.setenv("ENABLE_DEVICE_WRITES", "true")
+    monkeypatch.setenv("MAGEWELL_USERNAME", "test-user")
+    monkeypatch.setenv("MAGEWELL_PASSWORD", "test-password")
+    source = {
+        "name": "SOURCE-01",
+        "profile": {"mode": "camera"},
+        "wifi": [{"passwd": "source-secret"}],
+    }
+    target = {
+        "name": "TARGET-01",
+        "profile": {"mode": "old"},
+        "wifi": [{"passwd": "target-secret"}],
+    }
+    app.state.devices = [
+        {
+            "ip": "192.0.2.10",
+            "name": "SOURCE-01",
+            "settings": source,
+            "identity": {
+                "serial": "SOURCE-SERIAL",
+                "eth_mac": "00:11:22:33:44:55",
+                "fleet_id": "AIO-01",
+            },
+        },
+        {
+            "ip": "192.0.2.11",
+            "name": "TARGET-01",
+            "settings": target,
+            "identity": {
+                "serial": "TARGET-SERIAL",
+                "eth_mac": "00:11:22:33:44:66",
+                "fleet_id": "AIO-02",
+            },
+        },
+    ]
+    app.state.control_settings = copy.deepcopy(source)
+    app.state.control_device_ip = "192.0.2.10"
+    app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
+
+
+def test_profile_write_reserves_a_redacted_durable_receipt_before_device_mutation(
+    monkeypatch,
+) -> None:
+    _configure_profile_write_receipt_state(monkeypatch)
+    mutation_calls = 0
+
+    async def update_after_intent(*args, **kwargs):
+        nonlocal mutation_calls
+        mutation_calls += 1
+        receipts = app_module.get_profile_run_receipt_store().list_receipts()
+        assert len(receipts) == 1
+        assert receipts[0]["run_state"] == "intent-recorded"
+        return {"ip": "192.0.2.11", "magewell_id": "TARGET-01", "status": "updated"}
+
+    monkeypatch.setattr(app_module, "push_update_for_device", update_after_intent)
+    response = client.post(
+        "/push-updates",
+        json={
+            "confirm": True,
+            "devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}],
+        },
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert mutation_calls == 1
+    receipt_id = response.json()["receipt_id"]
+    receipt = client.get(f"/profile-run-receipts/{receipt_id}")
+    assert receipt.status_code == 200
+    body = receipt.json()
+    assert body["source"]["serial"] == "SOURCE-SERIAL"
+    assert body["targets"][0]["expected_settings_sha256"]
+    assert body["targets"][0]["mutation"] == {
+        "status": "updated",
+        "reason_code": "import-accepted",
+    }
+    assert body["targets"][0]["verification"]["status"] == "not-requested"
+    assert "source-secret" not in str(body)
+    assert "target-secret" not in str(body)
+    manifest = client.get("/profile-run-receipts/export-manifest")
+    assert manifest.status_code == 200
+    assert manifest.json()["receipt_record_count"] == 2
+
+
+def test_equivalent_profile_writes_keep_distinct_durable_receipts(monkeypatch) -> None:
+    _configure_profile_write_receipt_state(monkeypatch)
+
+    async def successful_update(*args, **kwargs):
+        return {"ip": "192.0.2.11", "magewell_id": "TARGET-01", "status": "updated"}
+
+    monkeypatch.setattr(app_module, "push_update_for_device", successful_update)
+    request = {
+        "confirm": True,
+        "devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}],
+    }
+    first = client.post("/push-updates", json=request, headers=OPERATOR_HEADERS)
+    second = client.post("/push-updates", json=request, headers=OPERATOR_HEADERS)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_id = first.json()["receipt_id"]
+    second_id = second.json()["receipt_id"]
+    assert first_id != second_id
+    first_receipt = client.get(f"/profile-run-receipts/{first_id}").json()
+    second_receipt = client.get(f"/profile-run-receipts/{second_id}").json()
+    assert first_receipt["binding_sha256"] == second_receipt["binding_sha256"]
+    assert client.get("/profile-run-receipts").json()["count"] == 2
+    assert client.get("/profile-run-receipts/export-manifest").json()["receipt_record_count"] == 4
+
+
+def test_receipt_reservation_failure_blocks_every_device_mutation(monkeypatch) -> None:
+    _configure_profile_write_receipt_state(monkeypatch)
+    mutation_calls = 0
+
+    class FailingStore:
+        def reserve_and_record_intent(self, receipt):
+            raise app_module.ReceiptSafetyError(
+                "Profile-run receipt storage is full; no device write was started."
+            )
+
+    async def forbidden_mutation(*args, **kwargs):
+        nonlocal mutation_calls
+        mutation_calls += 1
+        raise AssertionError("receipt failure must block device mutation")
+
+    monkeypatch.setattr(app_module, "get_profile_run_receipt_store", lambda: FailingStore())
+    monkeypatch.setattr(app_module, "push_update_for_device", forbidden_mutation)
+    response = client.post(
+        "/push-updates",
+        json={
+            "confirm": True,
+            "devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}],
+        },
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert response.status_code == 503
+    assert "no device write was started" in response.json()["detail"]
+    assert mutation_calls == 0
+
+
+def test_receipt_store_rejects_raw_settings_and_capacity_before_any_journal_write(
+    monkeypatch, tmp_path
+) -> None:
+    receipt_id = "a" * 32
+    unsafe_receipt = {
+        "receipt_id": receipt_id,
+        "settings": {"password": "must-never-persist"},
+    }
+    store = run_receipts.ProfileRunReceiptStore(tmp_path / "receipt-store")
+    with pytest.raises(run_receipts.ReceiptSafetyError, match="forbidden sensitive data"):
+        store.reserve_and_record_intent(unsafe_receipt)
+    assert not list(store.journal_dir.glob("*.jsonl"))
+
+    safe_receipt = {
+        "receipt_id": receipt_id,
+        "source": {"settings_sha256": "b" * 64},
+        "targets": [],
+    }
+    monkeypatch.setattr(run_receipts, "MAX_RECEIPT_STORAGE_BYTES", 1)
+    with pytest.raises(run_receipts.ReceiptSafetyError, match="storage is full"):
+        store.reserve_and_record_intent(safe_receipt)
+    assert not list(store.journal_dir.glob("*.jsonl"))
+
+
+def test_receipt_terminal_capacity_is_persisted_before_any_device_effect(
+    monkeypatch, tmp_path
+) -> None:
+    receipt_id = "a" * 32
+    receipt = {
+        "receipt_id": receipt_id,
+        "source": {"settings_sha256": "b" * 64},
+        "targets": [],
+    }
+    store = run_receipts.ProfileRunReceiptStore(tmp_path / "receipt-store")
+    monkeypatch.setattr(
+        run_receipts, "MAX_RECEIPT_STORAGE_BYTES", run_receipts.MAX_RECEIPT_BYTES * 4
+    )
+    store.reserve_and_record_intent(receipt)
+    assert store._reservation_path(receipt_id).exists()
+    with pytest.raises(run_receipts.ReceiptSafetyError, match="storage is full"):
+        store.reserve_and_record_intent({**receipt, "receipt_id": "b" * 32})
+    store.record_mutation_outcomes(receipt, [])
+    assert not store._reservation_path(receipt_id).exists()
+
+
+def test_profile_receipt_records_readback_without_exposing_settings(monkeypatch) -> None:
+    _configure_profile_write_receipt_state(monkeypatch)
+
+    async def successful_update(*args, **kwargs):
+        return {"ip": "192.0.2.11", "magewell_id": "TARGET-01", "status": "updated"}
+
+    async def report(*args, **kwargs):
+        return {
+            "name": "TARGET-01",
+            "profile": {"mode": "camera"},
+            "wifi": [{"passwd": "target-secret"}],
+        }
+
+    monkeypatch.setattr(app_module, "push_update_for_device", successful_update)
+    monkeypatch.setattr(app_module, "get_device_report_with_login", report)
+    push = client.post(
+        "/push-updates",
+        json={
+            "confirm": True,
+            "devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}],
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert push.status_code == 200
+    receipt_id = push.json()["receipt_id"]
+    verify = client.post(
+        "/verify-target",
+        json={
+            "device": {"ip": "192.0.2.11", "magewell_id": "TARGET-01"},
+            "receipt_id": receipt_id,
+        },
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert verify.status_code == 200
+    receipt = client.get(f"/profile-run-receipts/{receipt_id}").json()
+    assert receipt["targets"][0]["verification"]["status"] == "verified"
+    assert receipt["targets"][0]["verification"]["attempts"] == 1
+    assert "target-secret" not in str(receipt)
+
+
+def test_stale_receipt_profile_is_rejected_before_any_verification_network_read(
+    monkeypatch,
+) -> None:
+    _configure_profile_write_receipt_state(monkeypatch)
+    verification_calls = 0
+
+    async def successful_update(*args, **kwargs):
+        return {"ip": "192.0.2.11", "magewell_id": "TARGET-01", "status": "updated"}
+
+    async def forbidden_read(*args, **kwargs):
+        nonlocal verification_calls
+        verification_calls += 1
+        raise AssertionError("stale receipt must not start a verification read")
+
+    monkeypatch.setattr(app_module, "push_update_for_device", successful_update)
+    push = client.post(
+        "/push-updates",
+        json={
+            "confirm": True,
+            "devices": [{"ip": "192.0.2.11", "magewell_id": "TARGET-01"}],
+        },
+        headers=OPERATOR_HEADERS,
+    )
+    assert push.status_code == 200
+    app.state.control_settings = {"name": "SOURCE-01", "profile": {"mode": "new"}}
+    app.state.control_settings_sha256 = settings_fingerprint(app.state.control_settings)
+    monkeypatch.setattr(app_module, "get_device_report_with_login", forbidden_read)
+    verify = client.post(
+        "/verify-target",
+        json={
+            "device": {"ip": "192.0.2.11", "magewell_id": "TARGET-01"},
+            "receipt_id": push.json()["receipt_id"],
+        },
+        headers=OPERATOR_HEADERS,
+    )
+
+    assert verify.status_code == 409
+    assert "no verification read was sent" in verify.json()["detail"]
+    assert verification_calls == 0
 
 
 def test_verify_target_returns_only_fingerprints(monkeypatch) -> None:

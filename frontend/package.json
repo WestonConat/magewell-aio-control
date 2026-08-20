@@ -6,9 +6,10 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
+    "test": "node --experimental-strip-types --test tests/profileRunReceipts.test.ts",
     "lint": "eslint .",
-    "format": "prettier --write app/page.tsx app/naming/page.tsx app/bulk-update/page.tsx components/CustomFileInput.tsx components/NavMenu.tsx eslint.config.mjs next.config.ts package.json tsconfig.json README.md",
-    "format:check": "prettier --check app/page.tsx app/naming/page.tsx app/bulk-update/page.tsx components/CustomFileInput.tsx components/NavMenu.tsx eslint.config.mjs next.config.ts package.json tsconfig.json README.md",
+    "format": "prettier --write app/page.tsx app/profileRunReceipts.ts app/naming/page.tsx app/bulk-update/page.tsx tests/profileRunReceipts.test.ts components/CustomFileInput.tsx components/NavMenu.tsx eslint.config.mjs next.config.ts package.json tsconfig.json README.md",
+    "format:check": "prettier --check app/page.tsx app/profileRunReceipts.ts app/naming/page.tsx app/bulk-update/page.tsx tests/profileRunReceipts.test.ts components/CustomFileInput.tsx components/NavMenu.tsx eslint.config.mjs next.config.ts package.json tsconfig.json README.md",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
